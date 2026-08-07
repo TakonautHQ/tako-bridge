@@ -1,5 +1,5 @@
 ---
-name: Release
+name: Release assets
 
 "on":
   push:
@@ -42,24 +42,3 @@ jobs:
           name: release-assets
           path: dist/
           if-no-files-found: error
-
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Restore release assets
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: release-assets
-          path: dist
-      - name: Publish GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" \
-            dist/tako-bridge-*.tgz \
-            dist/tako-bridge-*.tgz.sha256 \
-            --verify-tag \
-            --generate-notes
