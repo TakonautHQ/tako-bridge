@@ -47,9 +47,9 @@ describe("evaluateBash", () => {
 	it("blocks pushes to protected branches", () => {
 		expect(evaluateBash("git push origin main", cfg).allow).toBe(false);
 		expect(evaluateBash("git push origin master", cfg).allow).toBe(false);
-		expect(evaluateBash("git -C /home/dev/repo push origin main", cfg).allow).toBe(
-			false,
-		);
+		expect(
+			evaluateBash("git -C /home/dev/repo push origin main", cfg).allow,
+		).toBe(false);
 	});
 
 	it("blocks migrations, deploys, secret reads", () => {

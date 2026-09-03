@@ -21,7 +21,7 @@ Tako Bridge refuses to start work when repository identity, GitHub access, Git i
 Install a pinned Git tag so updates are deliberate:
 
 ```bash
-pi install git:github.com/TakonautHQ/tako-bridge@v0.1.0
+pi install git:github.com/TakonautHQ/tako-bridge@v0.3.0
 ```
 
 Start Pi, then run:
@@ -90,6 +90,7 @@ Human decisions remain in Takonaut's Review queue. Approval completes the govern
 | --- | --- |
 | `/tako-start TASK-KEY [--base-ref WORKSPACE=REF --reason WHY]` | Reserve a run, verify its signed manifest, and provision governed worktrees. |
 | `/tako-context NODE` | Collect and record bounded local Context for the current Playbook node. |
+| `/tako-resume [SNAPSHOT HASH NODE]` | Resume Agentic Context after exact local revalidation. |
 | `/tako-confirm-context SNAPSHOT HASH` | Confirm the exact Context Snapshot and observation hash. |
 | `/tako-plan SNAPSHOT MARKDOWN` | Submit a snapshot-bound implementation plan. |
 | `/tako-step STEP ATTEMPT running\|failed\|completed [summary]` | Record one Step transition. |
@@ -104,16 +105,6 @@ Human decisions remain in Takonaut's Review queue. Approval completes the govern
 | `/tako-cancel-ack` | Acknowledge an observed cancellation request. |
 | `/tako-diagnostics WORKSPACE PATH` | Explicitly redact and upload one bounded diagnostic file. |
 | `/tako-cleanup` | Safely remove retained terminal managed worktrees while keeping branches. |
-
-### Legacy Bridge compatibility
-
-| Command | Effect |
-| --- | --- |
-| `/tako-test COMMAND [ARGS]` | Run and record Proposal test evidence after sensitive-value and local-policy checks. |
-| `/tako-submit [summary]` | Verify the open GitHub PR at the current commit and submit it to the Review queue. |
-| `/tako-current` | Reconcile durable local and server run state. |
-| `/tako-resume` | Resume retained Agentic Context confirmation or a legacy Bridge run. |
-| `/tako-abandon [reason]` | Release an unfinished legacy run without deleting local changes. |
 
 ## Security boundary
 
@@ -136,12 +127,6 @@ Agentic Delivery state is scoped by organization and Pi session:
 
 ```text
 ~/.takonaut/agentic-delivery/<organization-id>/<pi-session-id>.json
-```
-
-Legacy Bridge runs remain under:
-
-```text
-~/.takonaut/runs/<organization-id>.json
 ```
 
 Writes are atomic. Bridge rejects malformed files, symlinks, wrong ownership, permissive credential modes, partial environment credentials, non-HTTPS remote endpoints, and device responses that move credentials to another origin.

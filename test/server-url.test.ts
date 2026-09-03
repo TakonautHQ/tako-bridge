@@ -25,9 +25,7 @@ describe("Bridge server URLs", () => {
 		expect(() => bridgeServerUrl("https://user:pass@takonaut.app/mcp")).toThrow(
 			"must not include credentials",
 		);
-		expect(() => bridgeServerUrl("file:///tmp/mcp")).toThrow(
-			"valid HTTPS URL",
-		);
+		expect(() => bridgeServerUrl("file:///tmp/mcp")).toThrow("valid HTTPS URL");
 	});
 
 	it("requires device and MCP endpoints to stay on the login origin", () => {

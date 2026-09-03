@@ -1,36 +1,15 @@
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-	activeRunPath,
 	agenticRunPath,
-	clearActiveRun,
 	loadActiveAgenticRun,
-	loadActiveRun,
 	loadProjectAgentSync,
 	saveActiveAgenticRun,
-	saveActiveRun,
 	saveProjectAgentSync,
 	type ActiveAgenticDeliveryRun,
-	type ActiveBridgeRun,
 } from "../src/state";
-
-const RUN: ActiveBridgeRun = {
-	version: 1,
-	orgId: "org-1",
-	runId: "run-1",
-	taskId: "task-1",
-	taskKey: "PAY-142",
-	projectId: "project-1",
-	projectKey: "PAY",
-	repoRoot: "/work/payments",
-	branch: "pay-142-expired-session",
-	baseSha: "abc123",
-	phase: "working",
-	proposalId: null,
-	updatedAt: "2026-07-14T00:00:00.000Z",
-};
 
 const AGENTIC_RUN: ActiveAgenticDeliveryRun = {
 	version: 1,
@@ -90,48 +69,14 @@ const AGENTIC_RUN: ActiveAgenticDeliveryRun = {
 	updatedAt: "2030-01-01T00:00:00.000Z",
 };
 
-describe("durable active Bridge run state", () => {
-	it("uses distinct durable files for different organizations", () => {
-		expect(activeRunPath("org-a")).not.toBe(activeRunPath("org-b"));
-		expect(activeRunPath("org-a")).toContain("org-a");
-	});
-
+describe("durable Agentic Delivery run state", () => {
 	let dir: string;
-	let path: string;
 
 	beforeEach(() => {
 		dir = mkdtempSync(join(tmpdir(), "tako-run-state-"));
-		path = join(dir, "nested", "active-run.json");
 	});
 
 	afterEach(() => rmSync(dir, { recursive: true, force: true }));
-
-	it("writes atomically with owner-only permissions and round-trips", () => {
-		saveActiveRun(RUN, path);
-		expect(loadActiveRun(path)).toEqual(RUN);
-		expect(statSync(path).mode & 0o777).toBe(0o600);
-		expect(readFileSync(path, "utf-8")).toContain('"runId": "run-1"');
-	});
-
-	it("does not return state for another organization", () => {
-		saveActiveRun(RUN, path);
-		expect(loadActiveRun(path, "org-2")).toBeNull();
-	});
-
-	it("clears only the matching run", () => {
-		saveActiveRun(RUN, path);
-		clearActiveRun("different-run", path);
-		expect(loadActiveRun(path)).toEqual(RUN);
-
-		clearActiveRun("run-1", path);
-		expect(loadActiveRun(path)).toBeNull();
-	});
-
-	it("treats malformed state as absent", () => {
-		saveActiveRun(RUN, path);
-		require("node:fs").writeFileSync(path, "not-json");
-		expect(loadActiveRun(path)).toBeNull();
-	});
 
 	it("persists Project manifest trust independently from a Run", () => {
 		const syncPath = join(dir, "project-sync.json");

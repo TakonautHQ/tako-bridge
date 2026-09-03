@@ -287,7 +287,7 @@ export async function collectGitHubPrEvidence(
 	if (failed(prResult)) {
 		throw new Error(
 			`No GitHub pull request found for '${branch}'. Commit and push the branch, run ` +
-				"`gh pr create --fill`, then retry `/tako-submit`.",
+				"`gh pr create --fill`, then retry `/tako-complete`.",
 		);
 	}
 

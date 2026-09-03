@@ -58,18 +58,10 @@ const mocks = vi.hoisted(() => ({
 	proposeAgenticDeliveryCompletion: vi.fn(),
 	finalizeAgenticDeliveryCompletion: vi.fn(),
 	reportAgentTelemetry: vi.fn(),
-	startTask: vi.fn(),
-	claimTask: vi.fn(),
-	getCurrentBridgeRun: vi.fn(),
-	resumeBridgeRun: vi.fn(),
-	abandonBridgeRun: vi.fn(),
-	submitProposal: vi.fn(),
 	runGitHubPreflight: vi.fn(),
-	collectGitHubPrEvidence: vi.fn(),
 	collectAgenticWorkspaceCompletionEvidence: vi.fn(),
 	collectLocalContext: vi.fn(),
 	saveProjectRepoMapping: vi.fn(),
-	storedLegacyRun: null as any,
 	storedAgenticRun: null as any,
 	storedProjectSync: null as any,
 	verifyAgenticManifest: vi.fn(),
@@ -81,13 +73,6 @@ const mocks = vi.hoisted(() => ({
 		mocks.storedProjectSync = state;
 	}),
 	loadProjectAgentSync: vi.fn(() => mocks.storedProjectSync),
-	saveActiveRun: vi.fn((run: any) => {
-		mocks.storedLegacyRun = run;
-	}),
-	loadActiveRun: vi.fn(() => mocks.storedLegacyRun),
-	clearActiveRun: vi.fn(() => {
-		mocks.storedLegacyRun = null;
-	}),
 	saveActiveAgenticRun: vi.fn((run: any) => {
 		mocks.storedAgenticRun = run;
 	}),
@@ -136,8 +121,7 @@ vi.mock("../src/client", () => ({
 		retryAgenticDeliveryStep = mocks.retryAgenticDeliveryStep;
 		recordAgenticDeliveryGraphRoute = mocks.recordAgenticDeliveryGraphRoute;
 		resolveAgenticDeliveryHumanGate = mocks.resolveAgenticDeliveryHumanGate;
-		getAgenticDeliveryContextContract =
-			mocks.getAgenticDeliveryContextContract;
+		getAgenticDeliveryContextContract = mocks.getAgenticDeliveryContextContract;
 		recordAgenticDeliveryContext = mocks.recordAgenticDeliveryContext;
 		confirmAgenticDeliveryContext = mocks.confirmAgenticDeliveryContext;
 		resumeAgenticDeliveryContext = mocks.resumeAgenticDeliveryContext;
@@ -146,12 +130,6 @@ vi.mock("../src/client", () => ({
 		proposeAgenticDeliveryCompletion = mocks.proposeAgenticDeliveryCompletion;
 		finalizeAgenticDeliveryCompletion = mocks.finalizeAgenticDeliveryCompletion;
 		reportAgentTelemetry = mocks.reportAgentTelemetry;
-		startTask = mocks.startTask;
-		claimTask = mocks.claimTask;
-		getCurrentBridgeRun = mocks.getCurrentBridgeRun;
-		resumeBridgeRun = mocks.resumeBridgeRun;
-		abandonBridgeRun = mocks.abandonBridgeRun;
-		submitProposal = mocks.submitProposal;
 	},
 }));
 
@@ -163,7 +141,6 @@ vi.mock("../src/context", () => ({
 
 vi.mock("../src/git", () => ({
 	runGitHubPreflight: mocks.runGitHubPreflight,
-	collectGitHubPrEvidence: mocks.collectGitHubPrEvidence,
 	collectAgenticWorkspaceCompletionEvidence:
 		mocks.collectAgenticWorkspaceCompletionEvidence,
 	fromPiExecResult: (result: any) => ({
@@ -174,9 +151,6 @@ vi.mock("../src/git", () => ({
 }));
 
 vi.mock("../src/state", () => ({
-	saveActiveRun: mocks.saveActiveRun,
-	loadActiveRun: mocks.loadActiveRun,
-	clearActiveRun: mocks.clearActiveRun,
 	saveActiveAgenticRun: mocks.saveActiveAgenticRun,
 	loadActiveAgenticRun: mocks.loadActiveAgenticRun,
 	clearActiveAgenticRun: mocks.clearActiveAgenticRun,
@@ -205,7 +179,7 @@ vi.mock("../src/diagnostics", () => ({
 vi.mock("../src/telemetry", () => ({
 	startAgentTelemetryReporter: mocks.startAgentTelemetryReporter,
 	isFeatureDisabledError: (error: unknown) =>
-		String(error).includes("feature_disabled:dev_agents"),
+		String(error).includes("feature_disabled:agent_profiles_v2"),
 }));
 
 import takonautExtension from "../src/index";
@@ -234,7 +208,6 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		mocks.calls.length = 0;
-		mocks.storedLegacyRun = null;
 		mocks.storedAgenticRun = null;
 		mocks.storedProjectSync = null;
 		mocks.listStartableTasks.mockResolvedValue({ tasks: [] });
@@ -513,26 +486,18 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		return { commands, events, pi };
 	}
 
-	it("blocks sensitive or policy-denied legacy test commands before execution", async () => {
-		mocks.storedLegacyRun = {
-			runId: "legacy-run-1",
-			taskKey: "PAY-142",
-			repoRoot: "/work/repo",
-			tests: [],
-		};
-		const { commands, pi } = setup();
-		const ctx = commandContext();
+	it("does not register commands backed by retired legacy MCP tools", () => {
+		const { commands } = setup();
 
-		await commands.get("tako-test")?.(
-			"bun test --token supersecretvalue",
-			ctx,
+		expect([...commands.keys()]).not.toEqual(
+			expect.arrayContaining([
+				"tako-test",
+				"tako-submit",
+				"tako-current",
+				"tako-abandon",
+			]),
 		);
-		expect(pi.exec).not.toHaveBeenCalled();
-		expect(mocks.storedLegacyRun.tests).toEqual([]);
-
-		await commands.get("tako-test")?.("git push --force origin feature", ctx);
-		expect(pi.exec).not.toHaveBeenCalled();
-		expect(mocks.storedLegacyRun.tests).toEqual([]);
+		expect(commands.has("tako-resume")).toBe(true);
 	});
 
 	it("prompts for and persists an independently verified Workspace mapping", async () => {
@@ -581,8 +546,6 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			"provision",
 			"activate",
 		]);
-		expect(mocks.startTask).not.toHaveBeenCalled();
-		expect(mocks.claimTask).not.toHaveBeenCalled();
 		expect(mocks.startAgenticDelivery).toHaveBeenCalledWith({
 			taskKey: "PAY-142",
 			clientId: "client-1",
@@ -888,7 +851,9 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 				observation_hash: "a".repeat(64),
 				status: "confirmed",
 			},
-			steps: [{ step_instance_key: "inspect", latest_attempt_status: "running" }],
+			steps: [
+				{ step_instance_key: "inspect", latest_attempt_status: "running" },
+			],
 		});
 		await commands.get("tako-resume")?.("", ctx);
 		expect(mocks.resumeAgenticDeliveryContext).toHaveBeenCalledWith(
@@ -1217,7 +1182,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			commandContext(),
 		);
 		mocks.finalizeAgenticDeliveryCompletion.mockRejectedValue(
-			new Error("feature_disabled:dev_agents"),
+			new Error("feature_disabled:agent_profiles_v2"),
 		);
 		await commands.get("tako-finalize")?.("review-1", commandContext());
 		expect(mocks.storedAgenticRun).toMatchObject({
@@ -1393,7 +1358,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			commandContext(),
 		);
 		mocks.getAgenticDeliveryStatus.mockRejectedValue(
-			new Error("feature_disabled:dev_agents"),
+			new Error("feature_disabled:agent_profiles_v2"),
 		);
 		const notify = vi.fn();
 		await commands.get("tako-status")?.("", commandContext(notify));
@@ -1488,7 +1453,9 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		mocks.saveActiveAgenticRun.mockClear();
 
 		reporterOptions.onSequence(6);
-		reporterOptions.onFeatureDisabled(new Error("feature_disabled:dev_agents"));
+		reporterOptions.onFeatureDisabled(
+			new Error("feature_disabled:agent_profiles_v2"),
+		);
 
 		expect(mocks.saveActiveAgenticRun).not.toHaveBeenCalled();
 		expect(mocks.storedAgenticRun.runId).toBe("new-run");

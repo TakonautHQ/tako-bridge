@@ -11,39 +11,6 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { CapabilityEnvelope, TrustedSigningKey } from "./manifest";
 
-export type ActiveRunPhase =
-	| "claimed"
-	| "working"
-	| "submitting"
-	| "pending_review"
-	| "rejected";
-
-export interface ActiveRunTestEvidence {
-	command: string;
-	exitCode: number;
-	status: "passed" | "failed";
-	summary: string;
-	completedAt: string;
-	headSha: string;
-}
-
-export interface ActiveBridgeRun {
-	version: 1;
-	orgId: string;
-	runId: string;
-	taskId: string;
-	taskKey: string;
-	projectId: string;
-	projectKey: string;
-	repoRoot: string;
-	branch: string;
-	baseSha: string;
-	phase: ActiveRunPhase;
-	proposalId: string | null;
-	tests?: ActiveRunTestEvidence[];
-	updatedAt: string;
-}
-
 export interface AcceptedAgenticManifestState {
 	revision: number;
 	revisionId: string;
@@ -120,13 +87,6 @@ export interface ActiveAgenticDeliveryRun {
 	updatedAt: string;
 }
 
-export const ACTIVE_RUN_PATH = join(homedir(), ".takonaut", "active-run.json");
-
-export function activeRunPath(orgId: string): string {
-	const safeOrgId = orgId.replace(/[^a-zA-Z0-9-]/g, "_");
-	return join(homedir(), ".takonaut", "runs", `${safeOrgId}.json`);
-}
-
 export function agenticRunPath(orgId: string, piSessionId: string): string {
 	const safeOrgId = orgId.replace(/[^a-zA-Z0-9-]/g, "_");
 	const safeSessionId = piSessionId.replace(/[^a-zA-Z0-9-]/g, "_");
@@ -152,37 +112,6 @@ export function projectAgentSyncPath(orgId: string, projectId: string): string {
 	);
 }
 
-function valid(value: any): value is ActiveBridgeRun {
-	return (
-		value?.version === 1 &&
-		typeof value.orgId === "string" &&
-		typeof value.runId === "string" &&
-		typeof value.taskId === "string" &&
-		typeof value.taskKey === "string" &&
-		typeof value.projectId === "string" &&
-		typeof value.projectKey === "string" &&
-		typeof value.repoRoot === "string" &&
-		typeof value.branch === "string" &&
-		typeof value.baseSha === "string" &&
-		typeof value.phase === "string"
-	);
-}
-
-export function loadActiveRun(
-	path?: string,
-	orgId?: string,
-): ActiveBridgeRun | null {
-	const resolvedPath = path ?? (orgId ? activeRunPath(orgId) : ACTIVE_RUN_PATH);
-	try {
-		const parsed = JSON.parse(readFileSync(resolvedPath, "utf-8"));
-		if (!valid(parsed)) return null;
-		if (orgId && parsed.orgId !== orgId) return null;
-		return parsed;
-	} catch {
-		return null;
-	}
-}
-
 function saveJson(value: unknown, path: string): void {
 	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 	const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
@@ -194,21 +123,6 @@ function saveJson(value: unknown, path: string): void {
 	} finally {
 		rmSync(tmp, { force: true });
 	}
-}
-
-export function saveActiveRun(state: ActiveBridgeRun, path?: string): void {
-	saveJson(state, path ?? activeRunPath(state.orgId));
-}
-
-export function clearActiveRun(
-	runId: string,
-	path?: string,
-	orgId?: string,
-): void {
-	const resolvedPath = path ?? (orgId ? activeRunPath(orgId) : ACTIVE_RUN_PATH);
-	const current = loadActiveRun(resolvedPath);
-	if (!current || current.runId !== runId) return;
-	rmSync(resolvedPath, { force: true });
 }
 
 function validTrustedKey(value: any): value is TrustedSigningKey {

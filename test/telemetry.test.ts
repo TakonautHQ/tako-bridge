@@ -1,8 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { startAgentTelemetryReporter } from "../src/telemetry";
+import {
+	isFeatureDisabledError,
+	startAgentTelemetryReporter,
+} from "../src/telemetry";
 
 describe("Agent telemetry reporter", () => {
+	it("recognizes the active Agent Profiles feature-disable code", () => {
+		expect(
+			isFeatureDisabledError(new Error("feature_disabled:agent_profiles_v2")),
+		).toBe(true);
+	});
+
 	beforeEach(() => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));
@@ -121,7 +130,7 @@ describe("Agent telemetry reporter", () => {
 		await vi.advanceTimersByTimeAsync(5_000);
 		expect(sequences).toEqual([1]);
 		stop();
-		rejectReport?.(new Error("feature_disabled:dev_agents"));
+		rejectReport?.(new Error("feature_disabled:agent_profiles_v2"));
 		await Promise.resolve();
 		await Promise.resolve();
 
@@ -132,7 +141,7 @@ describe("Agent telemetry reporter", () => {
 
 	it("stops at the extension boundary when the feature is disabled", async () => {
 		const report = vi.fn(async () => {
-			throw new Error("feature_disabled:dev_agents");
+			throw new Error("feature_disabled:agent_profiles_v2");
 		});
 		const disabled = vi.fn();
 		startAgentTelemetryReporter({

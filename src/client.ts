@@ -1,7 +1,6 @@
-// Thin Takonaut MCP client for the Pi extension — wraps the MCP TypeScript SDK and the
-// Takonaut bridge tools (start_task, claim_task, report_progress, submit_proposal,
-// list_startable_tasks). Exercised at runtime against a live backend (the pure logic
-// that carries unit tests lives in policy.ts / device.ts).
+// Thin Takonaut MCP client for the Pi extension — wraps the MCP TypeScript SDK and
+// Takonaut's Agentic Delivery tools. Exercised at runtime against a live backend; pure
+// policy and device-flow logic remain covered in their focused modules.
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -13,9 +12,9 @@ import { bridgeServerUrl } from "./server-url.js";
 function parseToolJson(result: any): any {
 	const text = String(
 		result?.content?.find?.((c: any) => c.type === "text")?.text ?? "",
-	).slice(0, 2_000);
+	);
 	if (result?.isError === true) {
-		throw new Error(text || "Takonaut tool request failed.");
+		throw new Error(text.slice(0, 2_000) || "Takonaut tool request failed.");
 	}
 	try {
 		return JSON.parse(text || "{}");
@@ -72,52 +71,6 @@ export interface BridgeTaskContext {
 		updatedAt?: string | null;
 	} | null;
 	startability: { startable: boolean; reasons: string[] };
-}
-
-export interface BridgeRunStatus {
-	run: {
-		id: string;
-		taskId: string;
-		taskKey: string;
-		projectId: string;
-		projectKey: string;
-		status: string;
-		phase: string;
-		proposal: { id: string; status: string } | null;
-		error: string | null;
-		updatedAt: string | null;
-		canResume: boolean;
-		canAbandon: boolean;
-	};
-}
-
-export interface TestEvidence {
-	command: string;
-	exitCode: number;
-	status: "passed" | "failed";
-	summary: string;
-	completedAt: string;
-	headSha: string;
-}
-
-export interface GitHubProposalEvidence {
-	schemaVersion: 2;
-	provider: "github";
-	repository: {
-		remoteFingerprint: string;
-		baseSha: string;
-		headSha: string;
-		branch: string;
-		dirtyAtStart: false;
-	};
-	tests: TestEvidence[];
-	pr: { url: string; number: number; state: "open" };
-}
-
-export interface ProposalEvidence {
-	summary: string;
-	evidence: GitHubProposalEvidence;
-	idempotency_key?: string;
 }
 
 export interface BaseRefOverrideRequest {
@@ -294,7 +247,7 @@ export class TakonautClient {
 
 	constructor(private cfg: TakonautConfig) {
 		this.client = new Client(
-			{ name: "tako-bridge", version: "0.1.0" },
+			{ name: "tako-bridge", version: "0.3.0" },
 			{ capabilities: {} },
 		);
 	}
@@ -329,15 +282,6 @@ export class TakonautClient {
 
 	getBridgeTaskContext(taskKey: string): Promise<BridgeTaskContext> {
 		return this.call("get_bridge_task_context", { task_key: taskKey });
-	}
-
-	startTask(taskKey: string): Promise<{
-		status: string;
-		run_id: string;
-		task_key: string;
-		owned_by_current_user?: boolean;
-	}> {
-		return this.call("start_task", { task_key: taskKey });
 	}
 
 	startAgenticDelivery(
@@ -803,48 +747,6 @@ export class TakonautClient {
 				started_at: instance.startedAt,
 				last_activity_at: instance.lastActivityAt,
 			})),
-		});
-	}
-
-	claimTask(
-		taskKey: string,
-	): Promise<{ status: string; task_key: string; column: string | null }> {
-		return this.call("claim_task", { task_key: taskKey });
-	}
-
-	reportProgress(
-		taskKey: string,
-		message: string,
-		percent?: number,
-	): Promise<any> {
-		return this.call("report_progress", {
-			task_key: taskKey,
-			message,
-			percent: percent ?? null,
-		});
-	}
-
-	getCurrentBridgeRun(runId: string): Promise<BridgeRunStatus> {
-		return this.call("get_current_bridge_run", { run_id: runId });
-	}
-
-	resumeBridgeRun(runId: string): Promise<any> {
-		return this.call("resume_bridge_run", { run_id: runId });
-	}
-
-	abandonBridgeRun(runId: string, reason = ""): Promise<any> {
-		return this.call("abandon_bridge_run", { run_id: runId, reason });
-	}
-
-	submitProposal(
-		taskKey: string,
-		ev: ProposalEvidence,
-	): Promise<{ status: string; action_id: string }> {
-		return this.call("submit_proposal", {
-			task_key: taskKey,
-			summary: ev.summary,
-			evidence: ev.evidence,
-			idempotency_key: ev.idempotency_key ?? "",
 		});
 	}
 

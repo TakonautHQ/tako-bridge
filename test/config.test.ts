@@ -60,10 +60,7 @@ describe("secure Bridge profiles", () => {
 
 	it("refuses to persist a personal key for an insecure server", () => {
 		expect(() =>
-			saveConfig(
-				{ ...CREDS, serverUrl: "http://takonaut.test/mcp/" },
-				path,
-			),
+			saveConfig({ ...CREDS, serverUrl: "http://takonaut.test/mcp/" }, path),
 		).toThrow("requires HTTPS");
 	});
 

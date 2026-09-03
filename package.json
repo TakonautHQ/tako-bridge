@@ -1,6 +1,6 @@
 {
   "name": "@takonaut/tako-bridge",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Tako Bridge for Pi — governed Takonaut work, repository verification, durable recovery, and human-reviewed delivery evidence.",
   "license": "Apache-2.0",
   "type": "module",
@@ -52,9 +52,11 @@
   "overrides": {
     "@hono/node-server": "2.1.0",
     "brace-expansion": "5.0.9",
-    "fast-uri": "3.1.5",
+    "fast-uri": "3.1.6",
     "hono": "4.12.34",
-    "ip-address": "10.4.0"
+    "ip-address": "10.4.0",
+    "nanoid": "3.3.18",
+    "qs": "6.16.0"
   },
   "publishConfig": {
     "access": "public"

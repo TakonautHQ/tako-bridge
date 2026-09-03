@@ -13,7 +13,7 @@ interface TelemetryReporterOptions {
 }
 
 export function isFeatureDisabledError(error: unknown): boolean {
-	return String(error).includes("feature_disabled:dev_agents");
+	return String(error).includes("feature_disabled:agent_profiles_v2");
 }
 
 export function startAgentTelemetryReporter(

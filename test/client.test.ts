@@ -63,6 +63,26 @@ describe("TakonautClient transport", () => {
 		expect(mocks.connect).toHaveBeenCalledOnce();
 	});
 
+	it("parses successful MCP responses larger than 2,000 characters", async () => {
+		const response = {
+			tasks: [
+				{
+					task_key: "PAY-142",
+					task_title: "Implement the complete payments workflow",
+					project_key: "PAY",
+				},
+			],
+			context: "x".repeat(8_192),
+		};
+		mocks.callTool.mockResolvedValue({
+			content: [{ type: "text", text: JSON.stringify(response) }],
+		});
+
+		const client = new TakonautClient(cfg);
+
+		await expect(client.listStartableTasks()).resolves.toEqual(response);
+	});
+
 	it("refuses to send a personal key over insecure transport", async () => {
 		const client = new TakonautClient({
 			...cfg,
@@ -83,22 +103,14 @@ describe("TakonautClient transport", () => {
 		expect(mocks.close).toHaveBeenCalledOnce();
 	});
 
-	it("calls bounded task-context and durable recovery tools with server run ids", async () => {
+	it("calls the bounded task-context tool", async () => {
 		const client = new TakonautClient(cfg);
 		await client.getBridgeTaskContext("PAY-142");
-		await client.getCurrentBridgeRun("run-1");
-		await client.resumeBridgeRun("run-1");
-		await client.abandonBridgeRun("run-1", "user requested");
 
-		expect(mocks.callTool.mock.calls.map(([call]) => call)).toEqual([
-			{ name: "get_bridge_task_context", arguments: { task_key: "PAY-142" } },
-			{ name: "get_current_bridge_run", arguments: { run_id: "run-1" } },
-			{ name: "resume_bridge_run", arguments: { run_id: "run-1" } },
-			{
-				name: "abandon_bridge_run",
-				arguments: { run_id: "run-1", reason: "user requested" },
-			},
-		]);
+		expect(mocks.callTool).toHaveBeenCalledWith({
+			name: "get_bridge_task_context",
+			arguments: { task_key: "PAY-142" },
+		});
 	});
 
 	it("binds Agentic Delivery start, status, and telemetry to one Pi session", async () => {
@@ -333,7 +345,7 @@ describe("TakonautClient transport", () => {
 	});
 
 	it.each([
-		"feature_disabled:dev_agents",
+		"feature_disabled:agent_profiles_v2",
 		"unauthorized: personal key revoked",
 		"task_already_claimed: another Pi session owns this Task",
 	])("preserves MCP tool errors: %s", async (message) => {
@@ -354,51 +366,6 @@ describe("TakonautClient transport", () => {
 		await expect(client.listStartableTasks()).rejects.toThrow(
 			"Takonaut returned an invalid successful tool response.",
 		);
-	});
-
-	it("submits structured GitHub-only PR and test evidence", async () => {
-		const client = new TakonautClient(cfg);
-		const evidence = {
-			schemaVersion: 2 as const,
-			provider: "github" as const,
-			repository: {
-				remoteFingerprint: "github.com/cureocity/takonaut",
-				baseSha: "b".repeat(40),
-				headSha: "a".repeat(40),
-				branch: "feat/demo",
-				dirtyAtStart: false as const,
-			},
-			tests: [
-				{
-					command: "bun run test",
-					exitCode: 0,
-					status: "passed" as const,
-					summary: "42 passed",
-					completedAt: "2026-07-14T00:00:00.000Z",
-					headSha: "a".repeat(40),
-				},
-			],
-			pr: {
-				url: "https://github.com/cureocity/takonaut/pull/42",
-				number: 42,
-				state: "open" as const,
-			},
-		};
-		await client.submitProposal("PAY-142", {
-			summary: "done",
-			evidence,
-			idempotency_key: "idem",
-		});
-
-		expect(mocks.callTool).toHaveBeenLastCalledWith({
-			name: "submit_proposal",
-			arguments: {
-				task_key: "PAY-142",
-				summary: "done",
-				evidence,
-				idempotency_key: "idem",
-			},
-		});
 	});
 
 	it("routes graph steps, resolves human gates, and retries the latest attempt", async () => {

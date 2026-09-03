@@ -20,6 +20,19 @@ afterEach(() => {
 		rmSync(dir, { recursive: true, force: true });
 });
 
+function activeSourceContents(directory = join(packageRoot, "src")): string {
+	return readdirSync(directory, { withFileTypes: true })
+		.map((entry) => {
+			const path = join(directory, entry.name);
+			return entry.isDirectory()
+				? activeSourceContents(path)
+				: entry.isFile() && /\.ts$/.test(entry.name)
+					? readFileSync(path, "utf-8")
+					: "";
+		})
+		.join("\n");
+}
+
 function readPackage(): Record<string, any> {
 	let parsed: unknown;
 	try {
@@ -106,14 +119,18 @@ async function installedCommands(
 }
 
 describe("Pi package manifest", () => {
+	it("contains no retired Agent flag or consent route in active source", () => {
+		const source = activeSourceContents();
+		expect(source).not.toContain("dev_agents");
+		expect(source).not.toContain("/connect-agent");
+	});
+
 	it("declares a standalone Tako Bridge Pi package", () => {
 		const pkg = readPackage();
 		expect(pkg.name).toBe("@takonaut/tako-bridge");
 		expect(pkg.pi?.extensions).toEqual(["./src/index.ts"]);
 		expect(pkg.bin).toBeUndefined();
-		expect(pkg.peerDependencies?.["@earendil-works/pi-coding-agent"]).toBe(
-			"*",
-		);
+		expect(pkg.peerDependencies?.["@earendil-works/pi-coding-agent"]).toBe("*");
 		expect(pkg.devDependencies?.["@earendil-works/pi-coding-agent"]).toBe(
 			"0.84.0",
 		);
@@ -125,6 +142,16 @@ describe("Pi package manifest", () => {
 		]) {
 			expect(pkg.dependencies?.[name]).toBeUndefined();
 		}
+	});
+
+	it("uses the package version for runtime identity and manifest negotiation", () => {
+		const version = readPackage().version;
+		expect(readFileSync(join(packageRoot, "src", "client.ts"), "utf-8")).toContain(
+			`version: "${version}"`,
+		);
+		expect(readFileSync(join(packageRoot, "src", "index.ts"), "utf-8")).toContain(
+			`extensionVersion: "${version}"`,
+		);
 	});
 
 	it("packs only the Bridge runtime and public documentation", () => {
@@ -157,8 +184,6 @@ describe("Pi package manifest", () => {
 				"tako-cancel-ack",
 				"tako-diagnostics",
 				"tako-cleanup",
-				"tako-test",
-				"tako-submit",
 				"tako-step",
 				"tako-answer",
 				"tako-retry",
@@ -168,8 +193,14 @@ describe("Pi package manifest", () => {
 				"tako-confirm-context",
 				"tako-plan",
 				"tako-resume-review",
-				"tako-current",
 				"tako-resume",
+			]),
+		);
+		expect(names).not.toEqual(
+			expect.arrayContaining([
+				"tako-test",
+				"tako-submit",
+				"tako-current",
 				"tako-abandon",
 			]),
 		);

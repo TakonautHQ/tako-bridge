@@ -10,17 +10,14 @@
 //   /tako-diagnostics W PATH    explicitly upload one redacted Diagnostic bundle
 //   /tako-tasks                 list assigned startable work
 //   /tako-start TASK-KEY        context → repository preflight → reserve/claim
-//   /tako-test COMMAND [ARGS]   execute and record required test evidence
-//   /tako-submit [summary]      submit a verified GitHub PR to the Review queue
-//   /tako-current               reconcile durable local/server run state
-//   /tako-resume                resume the same queued/rejected run
-//   /tako-abandon [reason]      explicitly release an unfinished run
+//   /tako-agentic-test W CMD    execute head-bound Workspace test evidence
+//   /tako-complete SNAPSHOT     propose exact completion evidence for review
+//   /tako-resume                resume Agentic Context after revalidation
 
 import { createHash, randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import type {
-	AgentEndEvent,
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionContext,
@@ -32,10 +29,7 @@ import {
 	type BridgeTaskContext,
 	type GitHubRepositoryContext,
 } from "./client";
-import {
-	collectLocalContext,
-	formatLocalContextForInjection,
-} from "./context";
+import { collectLocalContext, formatLocalContextForInjection } from "./context";
 import { readAndPrepareDiagnostic } from "./diagnostics";
 import {
 	loadConfig,
@@ -47,7 +41,6 @@ import {
 import { runDeviceLogin, type DeviceDeps } from "./device";
 import {
 	collectAgenticWorkspaceCompletionEvidence,
-	collectGitHubPrEvidence,
 	fromPiExecResult,
 	runGitHubPreflight,
 	type CommandResult,
@@ -57,16 +50,12 @@ import { evaluateToolCall } from "./policy";
 import { missingCompanionPackages } from "./setup";
 import {
 	clearActiveAgenticRun,
-	clearActiveRun,
 	getOrCreatePiClientId,
 	loadActiveAgenticRun,
-	loadActiveRun,
 	loadProjectAgentSync,
 	saveActiveAgenticRun,
-	saveActiveRun,
 	saveProjectAgentSync,
 	type ActiveAgenticDeliveryRun,
-	type ActiveBridgeRun,
 } from "./state";
 import {
 	capabilityExpansionRequired,
@@ -1389,171 +1378,6 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerCommand("tako-test", {
-		description:
-			"Run and record required Proposal test evidence: /tako-test COMMAND [ARGS]",
-		handler: async (args, ctx) => {
-			const c = currentConfig(ctx);
-			if (!c) return;
-			const active = loadActiveRun(undefined, c.orgId);
-			if (!active)
-				return note(
-					ctx,
-					"No durable active run. Start or resume work first.",
-					"error",
-				);
-			const commandText = args.trim();
-			const argv = splitCommandLine(commandText);
-			if (!argv.length)
-				return note(ctx, "Usage: /tako-test COMMAND [ARGS]", "error");
-			if (containsSensitiveValue(commandText)) {
-				return note(
-					ctx,
-					"Test command contains a sensitive value and was not run or recorded.",
-					"error",
-				);
-			}
-			const policy = evaluateToolCall(
-				"bash",
-				{ command: commandText },
-				{
-					repoRoot: active.repoRoot,
-					protectedBranches: c.protectedBranches,
-				},
-			);
-			if (!policy.allow) {
-				return note(
-					ctx,
-					policy.reason ?? "Test command was blocked by Takonaut policy.",
-					"warning",
-				);
-			}
-			const head = await runner("git", [
-				"-C",
-				active.repoRoot,
-				"rev-parse",
-				"HEAD",
-			]);
-			const headSha = head.stdout.trim().toLowerCase();
-			if (head.exitCode !== 0 || !/^[0-9a-f]{40}$/.test(headSha)) {
-				return note(
-					ctx,
-					"Could not resolve the Git commit being tested.",
-					"error",
-				);
-			}
-			const result = await runner(argv[0], argv.slice(1), {
-				cwd: active.repoRoot,
-			});
-			const summary = boundedSummary(result);
-			const recorded = {
-				command: commandText,
-				exitCode: result.exitCode,
-				status:
-					result.exitCode === 0 ? ("passed" as const) : ("failed" as const),
-				summary,
-				completedAt: new Date().toISOString(),
-				headSha,
-			};
-			const priorTests = (active.tests ?? []).filter(
-				(test) => test.command !== recorded.command,
-			);
-			saveActiveRun({
-				...active,
-				tests: [...priorTests, recorded],
-				updatedAt: new Date().toISOString(),
-			});
-			note(
-				ctx,
-				`${recorded.status === "passed" ? "✓" : "✖"} Test ${recorded.status}: ${recorded.command}\n${summary}`,
-				recorded.status === "passed" ? "info" : "error",
-			);
-		},
-	});
-
-	pi.registerCommand("tako-submit", {
-		description: "Submit the current GitHub PR to the Takonaut Review queue",
-		handler: async (args, ctx) => {
-			const c = currentConfig(ctx);
-			const conn = ensure(ctx);
-			if (!c || !conn) return;
-			const active = loadActiveRun(undefined, c.orgId);
-			if (!active)
-				return note(
-					ctx,
-					"No durable active run. Run /tako-start or /tako-resume first.",
-					"error",
-				);
-			try {
-				const tests = active.tests ?? [];
-				if (!tests.length)
-					throw new Error(
-						"Tests are required. Run `/tako-test COMMAND [ARGS]` before submitting.",
-					);
-				if (
-					tests.some((test) => test.status !== "passed" || test.exitCode !== 0)
-				) {
-					throw new Error(
-						"All recorded tests must pass before Proposal submission.",
-					);
-				}
-				const context = await conn.getBridgeTaskContext(active.taskKey);
-				const preflight = await verifyRepository(runner, c, context);
-				if (preflight.branch !== active.branch) {
-					throw new Error(
-						"The repository branch changed since this run started. Switch back or abandon the run.",
-					);
-				}
-				const repo = context.project.githubRepository;
-				const pr = await collectGitHubPrEvidence(
-					runner,
-					active.repoRoot,
-					asExpectedRepo(repo),
-					active.branch,
-				);
-				if (tests.some((test) => test.headSha !== pr.headSha)) {
-					throw new Error(
-						"Recorded tests do not match the Pull Request head. Rerun each `/tako-test` command at the current commit.",
-					);
-				}
-				const result = await conn.submitProposal(active.taskKey, {
-					summary:
-						args.trim() || `Completed ${active.taskKey} via Tako Bridge (Pi).`,
-					evidence: {
-						schemaVersion: 2,
-						provider: "github",
-						repository: {
-							remoteFingerprint: preflight.remoteFingerprint,
-							baseSha: pr.baseSha,
-							headSha: pr.headSha,
-							branch: active.branch,
-							dirtyAtStart: false,
-						},
-						tests,
-						pr: { url: pr.url, number: pr.number, state: pr.state },
-					},
-					idempotency_key: `${active.runId}:${pr.number}:${pr.headSha}`,
-				});
-				saveActiveRun({
-					...active,
-					phase: "pending_review",
-					proposalId: result.action_id,
-					updatedAt: new Date().toISOString(),
-				});
-				note(
-					ctx,
-					`Proposal submitted for ${active.taskKey}. GitHub PR #${pr.number} is awaiting human approval in the Review queue.`,
-				);
-			} catch (error) {
-				note(
-					ctx,
-					`Failed to submit Proposal for ${active.taskKey}: ${errMsg(error)} Durable run state was preserved; fix the issue and retry.`,
-					"error",
-				);
-			}
-		},
-	});
-
 	pi.registerCommand("tako-step", {
 		description:
 			"Update one Agentic Delivery Step: /tako-step STEP ATTEMPT running|failed|completed [summary]",
@@ -1847,7 +1671,8 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("tako-context", {
-		description: "Collect and record governed Pi-local Context: /tako-context NODE",
+		description:
+			"Collect and record governed Pi-local Context: /tako-context NODE",
 		handler: async (args, ctx) => {
 			const c = currentConfig(ctx);
 			const conn = ensure(ctx);
@@ -2038,47 +1863,8 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerCommand("tako-current", {
-		description: "Reconcile the durable local Bridge run with Takonaut",
-		handler: async (_args, ctx) => {
-			const c = currentConfig(ctx);
-			const conn = ensure(ctx);
-			if (!c || !conn) return;
-			const active = loadActiveRun(undefined, c.orgId);
-			if (!active) return note(ctx, "No durable active Bridge run.");
-			try {
-				const { run } = await conn.getCurrentBridgeRun(active.runId);
-				note(
-					ctx,
-					`${run.taskKey}: ${run.phase} (server status: ${run.status})` +
-						(run.error ? `\n${run.error}` : ""),
-				);
-				if (run.phase === "completed" || run.phase === "failed") {
-					clearActiveRun(active.runId, undefined, active.orgId);
-					note(
-						ctx,
-						"Local recovery state cleared because the server run is terminal.",
-					);
-				} else {
-					saveActiveRun({
-						...active,
-						phase: localPhase(run.phase),
-						updatedAt: new Date().toISOString(),
-					});
-				}
-			} catch (error) {
-				note(
-					ctx,
-					`Could not reconcile ${active.taskKey}: ${errMsg(error)} Local state was preserved.`,
-					"error",
-				);
-			}
-		},
-	});
-
 	pi.registerCommand("tako-resume", {
-		description:
-			"Explicitly resume an Agentic Context confirmation or a legacy Bridge run",
+		description: "Explicitly resume an Agentic Context confirmation",
 		handler: async (args, ctx) => {
 			const c = currentConfig(ctx);
 			const conn = ensure(ctx);
@@ -2088,153 +1874,91 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				c.orgId,
 				piSessionId(ctx),
 			);
-			if (agentic) {
-				try {
-					let resumeArgs = args.trim();
-					let expectedVersion = agentic.versionNumber;
-					if (!resumeArgs) {
-						const status = await conn.getAgenticDeliveryStatus(
-							piSessionId(ctx),
-							agentic.runId,
-						);
-						if (typeof status.version === "number") expectedVersion = status.version;
-						const durableCommand = String(status.next_command ?? "");
-						if (!durableCommand.startsWith("/tako-resume ")) {
-							throw new Error(
-								"The durable Run does not currently own an executable Context resume command",
-							);
-						}
-						resumeArgs = durableCommand.slice("/tako-resume ".length);
-					}
-					const parts = resumeArgs.split(/\s+/);
-					const [snapshotId, observationHash, stepInstanceKey] = parts;
-					if (
-						parts.length !== 3 ||
-						!snapshotId ||
-						!/^[0-9a-f]{64}$/.test(observationHash ?? "") ||
-						!stepInstanceKey
-					) {
-						throw new Error(
-							"Usage: /tako-resume (automatic) or /tako-resume SNAPSHOT HASH NODE",
-						);
-					}
-					const local = await collectGovernedContext(
-						conn,
-						agentic,
-						stepInstanceKey,
-					);
-					const result = await conn.resumeAgenticDeliveryContext({
-						runId: agentic.runId,
-						sessionId: agentic.serverSessionId,
-						snapshotId,
-						observationHash,
-						expectedVersion,
-						idempotencyKey: `context-resume:${agentic.runId}:${randomUUID()}`,
-						observations: local.observations,
-					});
-					if (local.documents.length) {
-						pi.sendUserMessage(formatLocalContextForInjection(local), {
-							deliverAs: "followUp",
-						});
-					}
-					if ("context_pack_id" in result) {
-						saveActiveAgenticRun({
-							...agentic,
-							versionNumber: result.run_version,
-							updatedAt: new Date().toISOString(),
-						});
-						note(
-							ctx,
-							`Context drift created Snapshot ${result.id}; confirm with /tako-confirm-context ${result.id} ${result.observation_hash} before resuming.`,
-							"warning",
-						);
-					} else {
-						saveActiveAgenticRun({
-							...agentic,
-							status: result.run_status,
-							executorPhase: result.executor_phase,
-							versionNumber: result.run_version,
-							updatedAt: new Date().toISOString(),
-						});
-						note(ctx, `Resumed ${agentic.taskKey} after exact Context revalidation.`);
-					}
-				} catch (error) {
-					if (observeAgenticFeatureDisable(ctx, agentic, error)) return;
-					note(
-						ctx,
-						`Agentic resume failed: ${errMsg(error)} Local state was preserved.`,
-						"error",
-					);
-				}
-				return;
-			}
-			const active = loadActiveRun(undefined, c.orgId);
-			if (!active)
-				return note(ctx, "No durable active Bridge run to resume.", "error");
-			try {
-				const context = await conn.getBridgeTaskContext(active.taskKey);
-				const preflight = await verifyRepository(runner, c, context);
-				if (
-					preflight.repoRoot !== active.repoRoot ||
-					preflight.branch !== active.branch
-				) {
-					throw new Error(
-						"The current repository or branch does not match the durable run.",
-					);
-				}
-				const resumed = await conn.resumeBridgeRun(active.runId);
-				if (resumed.status === "pending_review") {
-					return note(
-						ctx,
-						`${active.taskKey} is awaiting human review and cannot be resumed yet.`,
-						"warning",
-					);
-				}
-				const next = {
-					...active,
-					phase: "working" as const,
-					updatedAt: new Date().toISOString(),
-				};
-				saveActiveRun(next);
-				note(ctx, `Resumed ${active.taskKey} (${resumed.status}).`);
-				pi.sendUserMessage(buildTaskPrompt(context, next));
-			} catch (error) {
-				note(
+			if (!agentic) {
+				return note(
 					ctx,
-					`Failed to resume ${active.taskKey}: ${errMsg(error)} Local state was preserved.`,
+					"No Agentic Delivery Run is active in this Pi session.",
 					"error",
 				);
 			}
-		},
-	});
-
-	pi.registerCommand("tako-abandon", {
-		description: "Explicitly release an unfinished durable Bridge run",
-		handler: async (args, ctx) => {
-			const c = currentConfig(ctx);
-			const conn = ensure(ctx);
-			if (!c || !conn) return;
-			const active = loadActiveRun(undefined, c.orgId);
-			if (!active)
-				return note(ctx, "No durable active Bridge run to abandon.", "error");
 			try {
-				const result = await conn.abandonBridgeRun(active.runId, args.trim());
-				if (result.status === "proposal_pending") {
-					return note(
-						ctx,
-						"This run has a Proposal in the Review queue and cannot be abandoned.",
-						"warning",
+				let resumeArgs = args.trim();
+				let expectedVersion = agentic.versionNumber;
+				if (!resumeArgs) {
+					const status = await conn.getAgenticDeliveryStatus(
+						piSessionId(ctx),
+						agentic.runId,
+					);
+					if (typeof status.version === "number")
+						expectedVersion = status.version;
+					const durableCommand = String(status.next_command ?? "");
+					if (!durableCommand.startsWith("/tako-resume ")) {
+						throw new Error(
+							"The durable Run does not currently own an executable Context resume command",
+						);
+					}
+					resumeArgs = durableCommand.slice("/tako-resume ".length);
+				}
+				const parts = resumeArgs.split(/\s+/);
+				const [snapshotId, observationHash, stepInstanceKey] = parts;
+				if (
+					parts.length !== 3 ||
+					!snapshotId ||
+					!/^[0-9a-f]{64}$/.test(observationHash ?? "") ||
+					!stepInstanceKey
+				) {
+					throw new Error(
+						"Usage: /tako-resume (automatic) or /tako-resume SNAPSHOT HASH NODE",
 					);
 				}
-				clearActiveRun(active.runId, undefined, active.orgId);
-				note(
-					ctx,
-					`Abandoned ${active.taskKey}. Local Git changes and the branch were not deleted.`,
+				const local = await collectGovernedContext(
+					conn,
+					agentic,
+					stepInstanceKey,
 				);
+				const result = await conn.resumeAgenticDeliveryContext({
+					runId: agentic.runId,
+					sessionId: agentic.serverSessionId,
+					snapshotId,
+					observationHash,
+					expectedVersion,
+					idempotencyKey: `context-resume:${agentic.runId}:${randomUUID()}`,
+					observations: local.observations,
+				});
+				if (local.documents.length) {
+					pi.sendUserMessage(formatLocalContextForInjection(local), {
+						deliverAs: "followUp",
+					});
+				}
+				if ("context_pack_id" in result) {
+					saveActiveAgenticRun({
+						...agentic,
+						versionNumber: result.run_version,
+						updatedAt: new Date().toISOString(),
+					});
+					note(
+						ctx,
+						`Context drift created Snapshot ${result.id}; confirm with /tako-confirm-context ${result.id} ${result.observation_hash} before resuming.`,
+						"warning",
+					);
+				} else {
+					saveActiveAgenticRun({
+						...agentic,
+						status: result.run_status,
+						executorPhase: result.executor_phase,
+						versionNumber: result.run_version,
+						updatedAt: new Date().toISOString(),
+					});
+					note(
+						ctx,
+						`Resumed ${agentic.taskKey} after exact Context revalidation.`,
+					);
+				}
 			} catch (error) {
+				if (observeAgenticFeatureDisable(ctx, agentic, error)) return;
 				note(
 					ctx,
-					`Failed to abandon ${active.taskKey}: ${errMsg(error)} Local state was preserved.`,
+					`Agentic resume failed: ${errMsg(error)} Local state was preserved.`,
 					"error",
 				);
 			}
@@ -2320,18 +2044,8 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			client = null;
 		}
 	});
-
 	// An agent turn ending is not proof that code is committed, pushed, tested, or
 	// represented by an open PR. Submission is therefore explicit and recoverable.
-	pi.on("agent_end", async (_event: AgentEndEvent, ctx: ExtensionContext) => {
-		const c = cfg ?? (cfg = loadConfig());
-		if (!c || !loadActiveRun(undefined, c.orgId)) return;
-		note(
-			ctx,
-			"Agent turn finished. Commit and push the feature branch, create a GitHub PR, " +
-				"run /tako-test, then run /tako-submit.",
-		);
-	});
 }
 
 function asExpectedRepo(repo: GitHubRepositoryContext) {
@@ -2374,42 +2088,6 @@ async function verifyRepository(
 	return preflight;
 }
 
-function buildTaskPrompt(
-	context: BridgeTaskContext,
-	active: ActiveBridgeRun,
-): string {
-	const criteria = context.task.acceptanceCriteria.length
-		? context.task.acceptanceCriteria
-				.map((item, index) => `${index + 1}. ${item}`)
-				.join("\n")
-		: "No separate acceptance criteria were configured; follow the description and Exit gates.";
-	const gates = context.deliveryFlow.exitGates.length
-		? context.deliveryFlow.exitGates
-				.map((gate) => `- ${gate.name} (${gate.enforcement})`)
-				.join("\n")
-		: "- None configured";
-	return [
-		`You are working ${context.task.levelName} ${context.task.key}: ${context.task.title}`,
-		"",
-		"Description:",
-		context.task.description || "No description provided.",
-		"",
-		"Acceptance criteria:",
-		criteria,
-		"",
-		`Project: ${context.project.name} (${context.project.key})`,
-		`Repository: ${context.project.githubRepository.remoteFingerprint}`,
-		`Local root: ${active.repoRoot}`,
-		`Feature branch: ${active.branch}`,
-		`Current Stage: ${context.deliveryFlow.stageName ?? "Unassigned"}`,
-		"Exit gates:",
-		gates,
-		"",
-		"Implement the work using this repository's conventions and tests. Do not deploy or push to a protected branch. " +
-			"When the code is ready, stop. The developer must commit/push, create the GitHub PR, record tests with /tako-test, and submit explicitly.",
-	].join("\n");
-}
-
 function startabilityMessage(context: BridgeTaskContext): string {
 	const messages: Record<string, string> = {
 		not_assigned: "This work item is not assigned to you.",
@@ -2423,18 +2101,6 @@ function startabilityMessage(context: BridgeTaskContext): string {
 			.map((reason) => messages[reason] ?? reason)
 			.join(" ") || "This work item cannot be started."
 	);
-}
-
-function localPhase(phase: string): ActiveBridgeRun["phase"] {
-	if (
-		phase === "pending_review" ||
-		phase === "rejected" ||
-		phase === "working" ||
-		phase === "claimed"
-	) {
-		return phase;
-	}
-	return "working";
 }
 
 async function execute(

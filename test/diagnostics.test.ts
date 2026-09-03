@@ -10,11 +10,9 @@ import {
 describe("explicit Diagnostic bundles", () => {
 	it("redacts secrets and local roots without echoing rejected values", () => {
 		const secret = ["sk", "live", "SUPERSECRETVALUE123456789"].join("-");
-		const githubSecret = [
-			"github",
-			"pat",
-			"1234567890abcdefghijklmnop",
-		].join("_");
+		const githubSecret = ["github", "pat", "1234567890abcdefghijklmnop"].join(
+			"_",
+		);
 		const prepared = prepareDiagnosticContent(
 			`Authorization: Bearer ${secret}\n${githubSecret}\n/home/dev/private/file.py`,
 		);
