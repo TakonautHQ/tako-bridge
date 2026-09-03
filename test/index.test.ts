@@ -35,6 +35,18 @@ const mocks = vi.hoisted(() => ({
 	calls: [] as string[],
 	close: vi.fn(),
 	listStartableTasks: vi.fn(),
+	createBridgeStandupDraft: vi.fn(),
+	getBridgeStandupStatus: vi.fn(),
+	panelSettings: {
+		visible: true,
+		showRun: true,
+		showTasks: true,
+		showStandup: true,
+		taskLimit: 3 as 1 | 3 | 5 | 10,
+		refreshSeconds: 30 as 0 | 15 | 30 | 60,
+		standupProjectKey: undefined as string | undefined,
+	},
+	savePanelSettings: vi.fn(),
 	getBridgeTaskContext: vi.fn(),
 	startAgenticDelivery: vi.fn(),
 	activateAgenticDelivery: vi.fn(),
@@ -98,6 +110,8 @@ vi.mock("../src/config", () => ({
 		credentialPath: "/home/dev/.takonaut/credentials.json",
 	}),
 	saveConfig: vi.fn(),
+	loadPanelSettings: () => mocks.panelSettings,
+	savePanelSettings: mocks.savePanelSettings,
 	projectRepoMappingKey: (orgId: string, projectId: string) =>
 		`${orgId}:${projectId}`,
 	saveProjectRepoMapping: mocks.saveProjectRepoMapping,
@@ -107,6 +121,8 @@ vi.mock("../src/client", () => ({
 	TakonautClient: class {
 		close = mocks.close;
 		listStartableTasks = mocks.listStartableTasks;
+		createBridgeStandupDraft = mocks.createBridgeStandupDraft;
+		getBridgeStandupStatus = mocks.getBridgeStandupStatus;
 		getBridgeTaskContext = mocks.getBridgeTaskContext;
 		startAgenticDelivery = mocks.startAgenticDelivery;
 		activateAgenticDelivery = mocks.activateAgenticDelivery;
@@ -191,7 +207,12 @@ function commandContext(notify = vi.fn()) {
 		hasUI: true,
 		ui: {
 			notify,
+			setWidget: vi.fn(),
+			select: vi.fn(async (): Promise<string | undefined> => undefined),
 			confirm: vi.fn(async () => true),
+			editor: vi.fn(
+				async (_title: string, value: string): Promise<string | undefined> => value,
+			),
 			input: vi.fn(
 				async (
 					_title: string,
@@ -210,7 +231,25 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		mocks.calls.length = 0;
 		mocks.storedAgenticRun = null;
 		mocks.storedProjectSync = null;
+		mocks.panelSettings = {
+			visible: true,
+			showRun: true,
+			showTasks: true,
+			showStandup: true,
+			taskLimit: 3,
+			refreshSeconds: 30,
+			standupProjectKey: undefined,
+		};
 		mocks.listStartableTasks.mockResolvedValue({ tasks: [] });
+		mocks.getBridgeStandupStatus.mockResolvedValue({
+			project_key: "PAY",
+			status: "pending",
+			submitted_at: null,
+		});
+		mocks.createBridgeStandupDraft.mockResolvedValue({
+			draft_url: "/projects/PAY/standup?bridge_draft=token-1",
+			expires_at: "2026-09-03T18:00:00+00:00",
+		});
 		mocks.getBridgeTaskContext.mockImplementation(async () => {
 			mocks.calls.push("context");
 			return taskContext;
@@ -500,6 +539,178 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		expect(commands.has("tako-resume")).toBe(true);
 	});
 
+	it("shows the selected Project Standup status in the Pi panel", async () => {
+		mocks.panelSettings = { ...mocks.panelSettings, standupProjectKey: "PAY" };
+		const { events } = setup();
+		const ctx = { ...commandContext(), mode: "tui" };
+
+		await events.get("session_start")?.({}, ctx);
+
+		expect(ctx.ui.setWidget).toHaveBeenCalledWith(
+			"tako-bridge-panel",
+			expect.arrayContaining(["Standup (PAY): Pending · /tako-standup"]),
+		);
+		await events.get("session_shutdown")?.({}, ctx);
+	});
+
+	it("drafts a Standup from the Pi session and opens the confirmed web handoff", async () => {
+		mocks.panelSettings = { ...mocks.panelSettings, standupProjectKey: "PAY" };
+		const { commands, pi } = setup();
+		const complete = vi.fn(async () => ({
+			content: [
+				{
+					type: "text",
+					text: JSON.stringify({
+						yesterday: "Fixed device authentication.",
+						today: "Finish task visibility.",
+						blockers: "None.",
+						other: "",
+					}),
+				},
+			],
+		}));
+		const ctx = {
+			...commandContext(),
+			mode: "tui",
+			model: { provider: "test", id: "model" },
+			modelRegistry: { complete },
+			sessionManager: {
+				getSessionId: () => "pi-session-1",
+				getBranch: () => [
+					{
+						type: "message",
+						message: {
+							role: "user",
+							content: [{ type: "text", text: "Fix device authentication" }],
+						},
+					},
+				],
+			},
+		};
+		ctx.ui.editor = vi.fn(async (_title: string, value: string) => value);
+
+		await commands.get("tako-standup")?.("", ctx);
+
+		expect(complete).toHaveBeenCalledWith(
+			ctx.model,
+			expect.objectContaining({
+				messages: expect.arrayContaining([
+					expect.objectContaining({
+						content: expect.arrayContaining([
+							expect.objectContaining({
+								text: expect.stringContaining("Fix device authentication"),
+							}),
+						]),
+					}),
+				]),
+			}),
+			expect.any(Object),
+		);
+		expect(mocks.createBridgeStandupDraft).toHaveBeenCalledWith({
+			projectKey: "PAY",
+			sections: {
+				yesterday: "Fixed device authentication.",
+				today: "Finish task visibility.",
+				blockers: "None.",
+				other: "",
+			},
+		});
+		expect(pi.exec).toHaveBeenCalledWith(
+			"open",
+			["https://takonaut.test/projects/PAY/standup?bridge_draft=token-1"],
+			undefined,
+		);
+	});
+
+	it("lets the developer hide and persist the Tako panel", async () => {
+		const { commands } = setup();
+		const ctx = { ...commandContext(), mode: "tui" };
+		ctx.ui.select = vi
+			.fn()
+			.mockResolvedValueOnce("Hide panel")
+			.mockResolvedValueOnce("Done");
+
+		await commands.get("tako-panel")?.("", ctx);
+
+		expect(mocks.savePanelSettings).toHaveBeenCalledWith(
+			expect.objectContaining({ visible: false }),
+			"/home/dev/.takonaut/bridge.json",
+		);
+		expect(ctx.ui.setWidget).toHaveBeenCalledWith(
+			"tako-bridge-panel",
+			undefined,
+		);
+	});
+
+	it("shows a compact assigned-work panel above the Pi editor", async () => {
+		mocks.listStartableTasks.mockResolvedValueOnce({
+			tasks: [
+				{
+					task_key: "PAY-142",
+					task_title: "Handle expired sessions",
+					project_key: "PAY",
+					startability: { startable: true, reasons: [] },
+				},
+				{
+					task_key: "PAY-143",
+					task_title: "Rotate credentials",
+					project_key: "PAY",
+					startability: {
+						startable: false,
+						reasons: ["project_agent_playbook_required"],
+					},
+				},
+			],
+		});
+		const { events } = setup();
+		const ctx = { ...commandContext(), mode: "tui" };
+
+		await events.get("session_start")?.({}, ctx);
+
+		expect(ctx.ui.setWidget).toHaveBeenCalledWith("tako-bridge-panel", [
+			"TAKO BRIDGE · Connected",
+			"Run: Idle",
+			"Standup: Select a Project · /tako-panel",
+			"Tasks: 2 assigned · 1 ready · 1 blocked",
+			"  READY    PAY-142  Handle expired sessions",
+			"  BLOCKED  PAY-143  Rotate credentials — Default Playbook is not published.",
+		]);
+		await events.get("session_shutdown")?.({}, ctx);
+	});
+
+	it("lists every assigned task with readiness and ineligibility reasons", async () => {
+		mocks.listStartableTasks.mockResolvedValueOnce({
+			tasks: [
+				{
+					task_key: "PAY-142",
+					task_title: "Handle expired sessions",
+					project_key: "PAY",
+					startability: { startable: true, reasons: [] },
+				},
+				{
+					task_key: "PAY-143",
+					task_title: "Rotate credentials",
+					project_key: "PAY",
+					startability: {
+						startable: false,
+						reasons: ["project_agent_playbook_required"],
+					},
+				},
+			],
+		});
+		const { commands } = setup();
+		const notify = vi.fn();
+
+		await commands.get("tako-tasks")?.("", commandContext(notify));
+
+		expect(notify).toHaveBeenCalledWith(
+			"Assigned work: 2 total · 1 ready · 1 blocked\n" +
+				"  READY    PAY-142  Handle expired sessions  (PAY)\n" +
+				"  BLOCKED  PAY-143  Rotate credentials  (PAY) — Default Playbook is not published.",
+			"info",
+		);
+	});
+
 	it("prompts for and persists an independently verified Workspace mapping", async () => {
 		mocks.runGitHubPreflight.mockResolvedValueOnce({
 			repoRoot: "/work/current",
@@ -551,7 +762,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			clientId: "client-1",
 			sessionId: "pi-session-1",
 			sessionLabel: expect.stringContaining("PAY-142"),
-			extensionVersion: "0.3.0",
+			extensionVersion: "0.4.0",
 			manifestSchemaVersion: 2,
 			baseRefOverrides: [],
 			idempotencyKey: expect.stringMatching(

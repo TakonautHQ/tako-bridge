@@ -27,6 +27,7 @@ export interface StartableTask {
 	task_key: string;
 	task_title: string;
 	project_key: string;
+	startability: { startable: boolean; reasons: string[] };
 }
 
 export interface GitHubRepositoryContext {
@@ -247,7 +248,7 @@ export class TakonautClient {
 
 	constructor(private cfg: TakonautConfig) {
 		this.client = new Client(
-			{ name: "tako-bridge", version: "0.3.0" },
+			{ name: "tako-bridge", version: "0.4.0" },
 			{ capabilities: {} },
 		);
 	}
@@ -278,6 +279,24 @@ export class TakonautClient {
 
 	listStartableTasks(projectKey = ""): Promise<{ tasks: StartableTask[] }> {
 		return this.call("list_startable_tasks", { project_key: projectKey });
+	}
+
+	getBridgeStandupStatus(projectKey: string): Promise<{
+		project_key: string;
+		status: "pending" | "submitted";
+		submitted_at: string | null;
+	}> {
+		return this.call("get_bridge_standup_status", { project_key: projectKey });
+	}
+
+	createBridgeStandupDraft(input: {
+		projectKey: string;
+		sections: Record<string, string>;
+	}): Promise<{ draft_url: string; expires_at: string }> {
+		return this.call("create_bridge_standup_draft", {
+			project_key: input.projectKey,
+			sections: input.sections,
+		});
 	}
 
 	getBridgeTaskContext(taskKey: string): Promise<BridgeTaskContext> {

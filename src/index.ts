@@ -8,7 +8,7 @@
 //   /tako-cancel-ack            acknowledge an observed cancellation request
 //   /tako-cleanup               clean retained terminal managed worktrees
 //   /tako-diagnostics W PATH    explicitly upload one redacted Diagnostic bundle
-//   /tako-tasks                 list assigned startable work
+//   /tako-tasks                 list all assigned work with startability
 //   /tako-start TASK-KEY        context → repository preflight → reserve/claim
 //   /tako-agentic-test W CMD    execute head-bound Workspace test evidence
 //   /tako-complete SNAPSHOT     propose exact completion evidence for review
@@ -33,9 +33,12 @@ import { collectLocalContext, formatLocalContextForInjection } from "./context";
 import { readAndPrepareDiagnostic } from "./diagnostics";
 import {
 	loadConfig,
+	loadPanelSettings,
 	projectRepoMappingKey,
 	saveConfig,
+	savePanelSettings,
 	saveProjectRepoMapping,
+	type PanelSettings,
 	type TakonautConfig,
 } from "./config";
 import { runDeviceLogin, type DeviceDeps } from "./device";
@@ -125,6 +128,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	let cfg: TakonautConfig | null = null;
 	let client: TakonautClient | null = null;
 	let stopTelemetry: (() => void) | null = null;
+	let panelTimer: ReturnType<typeof setInterval> | null = null;
 
 	const runner: CommandRunner = async (command, args, options) =>
 		execute(pi, command, args, options);
@@ -179,6 +183,92 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	function stopAgentTelemetry(): void {
 		stopTelemetry?.();
 		stopTelemetry = null;
+	}
+
+	function stopPanel(): void {
+		if (panelTimer) clearInterval(panelTimer);
+		panelTimer = null;
+	}
+
+	async function refreshPanel(
+		ctx: ExtensionContext,
+		c: TakonautConfig,
+		settings: PanelSettings = loadPanelSettings(c.configPath),
+	): Promise<void> {
+		if (ctx.mode !== "tui" || !ctx.ui?.setWidget) return;
+		if (!settings.visible) {
+			ctx.ui.setWidget("tako-bridge-panel", undefined);
+			return;
+		}
+		try {
+			const conn = ensure(ctx);
+			if (!conn) return;
+			const [{ tasks }, standup] = await Promise.all([
+				conn.listStartableTasks(),
+				settings.showStandup && settings.standupProjectKey
+					? conn.getBridgeStandupStatus(settings.standupProjectKey).catch(() => null)
+					: Promise.resolve(null),
+			]);
+			const ready = tasks.filter((task) => task.startability.startable).length;
+			const active = loadActiveAgenticRun(
+				undefined,
+				c.orgId,
+				piSessionId(ctx),
+			);
+			const lines = ["TAKO BRIDGE · Connected"];
+			if (settings.showRun) {
+				lines.push(
+					active
+						? `Run: ${active.taskKey} · ${active.executorPhase} · ${active.status}`
+						: "Run: Idle",
+				);
+			}
+			if (settings.showStandup) {
+				if (!settings.standupProjectKey) {
+					lines.push("Standup: Select a Project · /tako-panel");
+				} else if (!standup) {
+					lines.push(`Standup (${settings.standupProjectKey}): Unavailable`);
+				} else {
+					lines.push(
+						standup.status === "submitted"
+							? `Standup (${settings.standupProjectKey}): Submitted`
+							: `Standup (${settings.standupProjectKey}): Pending · /tako-standup`,
+					);
+				}
+			}
+			if (settings.showTasks) {
+				lines.push(
+					`Tasks: ${tasks.length} assigned · ${ready} ready · ${tasks.length - ready} blocked`,
+					...tasks.slice(0, settings.taskLimit).map((task) => {
+						const status = task.startability.startable ? "READY  " : "BLOCKED";
+						const reason = task.startability.startable
+							? ""
+							: ` — ${formatStartabilityReasons(task.startability.reasons)}`;
+						return `  ${status}  ${task.task_key}  ${task.task_title}${reason}`;
+					}),
+				);
+			}
+			ctx.ui.setWidget("tako-bridge-panel", lines);
+		} catch (error) {
+			ctx.ui.setWidget("tako-bridge-panel", [
+				"TAKO BRIDGE · Connection delayed",
+				`Refresh failed: ${errMsg(error)}`,
+			]);
+		}
+	}
+
+	function startPanelRefresh(
+		ctx: ExtensionContext,
+		c: TakonautConfig,
+		settings: PanelSettings,
+	): void {
+		stopPanel();
+		if (!settings.visible || settings.refreshSeconds === 0) return;
+		panelTimer = setInterval(
+			() => void refreshPanel(ctx, c),
+			settings.refreshSeconds * 1_000,
+		);
+		panelTimer.unref?.();
 	}
 
 	function saveFeatureDisabled(state: ActiveAgenticDeliveryRun): void {
@@ -550,23 +640,186 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("tako-panel", {
+		description: "Configure the Tako Bridge panel above the prompt editor",
+		handler: async (_args, ctx) => {
+			const c = currentConfig(ctx);
+			const conn = ensure(ctx);
+			if (!c || !conn || !ctx.hasUI) return;
+			let settings = loadPanelSettings(c.configPath);
+			while (true) {
+				const choice = await ctx.ui.select("Tako Bridge panel", [
+					settings.visible ? "Hide panel" : "Show panel",
+					settings.showRun ? "Hide Run status" : "Show Run status",
+					settings.showTasks ? "Hide assigned tasks" : "Show assigned tasks",
+					settings.showStandup ? "Hide Standup status" : "Show Standup status",
+					`Standup Project: ${settings.standupProjectKey ?? "not selected"}`,
+					`Task rows: ${settings.taskLimit}`,
+					`Refresh: ${settings.refreshSeconds === 0 ? "manual" : `${settings.refreshSeconds}s`}`,
+					"Refresh now",
+					"Done",
+				]);
+				if (!choice || choice === "Done") break;
+				if (choice === "Hide panel" || choice === "Show panel") {
+					settings = { ...settings, visible: !settings.visible };
+				} else if (choice.includes("Run status")) {
+					settings = { ...settings, showRun: !settings.showRun };
+				} else if (choice.includes("assigned tasks")) {
+					settings = { ...settings, showTasks: !settings.showTasks };
+				} else if (choice.includes("Standup status")) {
+					settings = { ...settings, showStandup: !settings.showStandup };
+				} else if (choice.startsWith("Standup Project:")) {
+					const { tasks } = await conn.listStartableTasks();
+					const projects = [...new Set(tasks.map((task) => task.project_key))];
+					const selected = await ctx.ui.select("Standup Project", projects);
+					if (selected) settings = { ...settings, standupProjectKey: selected };
+				} else if (choice.startsWith("Task rows:")) {
+					const selected = await ctx.ui.select("Task rows", ["1", "3", "5", "10"]);
+					if (selected) {
+						settings = {
+							...settings,
+							taskLimit: Number(selected) as PanelSettings["taskLimit"],
+						};
+					}
+				} else if (choice.startsWith("Refresh:")) {
+					const selected = await ctx.ui.select("Refresh interval", [
+						"Manual",
+						"15 seconds",
+						"30 seconds",
+						"60 seconds",
+					]);
+					if (selected) {
+						settings = {
+							...settings,
+							refreshSeconds: (selected === "Manual"
+								? 0
+								: Number(selected.split(" ")[0])) as PanelSettings["refreshSeconds"],
+						};
+					}
+				}
+				savePanelSettings(settings, c.configPath);
+				await refreshPanel(ctx, c, settings);
+				startPanelRefresh(ctx, c, settings);
+			}
+		},
+	});
+
+	pi.registerCommand("tako-standup", {
+		description: "Draft a Standup from this Pi session and open it in Takonaut",
+		handler: async (_args, ctx) => {
+			const c = currentConfig(ctx);
+			const conn = ensure(ctx);
+			if (!c || !conn || !ctx.hasUI) return;
+			let settings = loadPanelSettings(c.configPath);
+			let projectKey = settings.standupProjectKey;
+			if (!projectKey) {
+				const { tasks } = await conn.listStartableTasks();
+				const projects = [...new Set(tasks.map((task) => task.project_key))];
+				projectKey = await ctx.ui.select("Standup Project", projects);
+				if (!projectKey) return;
+				settings = { ...settings, standupProjectKey: projectKey };
+				savePanelSettings(settings, c.configPath);
+			}
+			const approved = await ctx.ui.confirm(
+				"Draft Standup from this Pi session?",
+				"Your current Pi conversation plus bounded git log/status summaries will be sent to your configured Pi model. Only the draft you review and confirm will be uploaded to Takonaut.",
+			);
+			if (!approved) return;
+			if (!ctx.model) {
+				return note(ctx, "Select a Pi model before drafting a Standup.", "error");
+			}
+			const conversation = buildStandupConversation(
+				ctx.sessionManager.getBranch() as unknown[],
+			);
+			const [gitLog, gitStatus, gitDiff] = await Promise.all([
+				execute(pi, "git", ["-C", c.repoRoot, "log", "-10", "--oneline"]),
+				execute(pi, "git", ["-C", c.repoRoot, "status", "--short"]),
+				execute(pi, "git", ["-C", c.repoRoot, "diff", "--stat", "HEAD"]),
+			]);
+			const response = await ctx.modelRegistry.complete(
+				ctx.model,
+				{
+					messages: [
+						{
+							role: "user" as const,
+							content: [
+								{
+									type: "text" as const,
+									text: buildStandupDraftPrompt(projectKey, conversation, {
+										log: boundedSummary(gitLog),
+										status: boundedSummary(gitStatus),
+										diff: boundedSummary(gitDiff),
+									}),
+								},
+							],
+							timestamp: Date.now(),
+						},
+					],
+				},
+				{
+					reasoningEffort: "low",
+					cacheRetention: "none",
+					sessionId: randomUUID(),
+				},
+			);
+			const generated = response.content
+				.filter(
+					(part): part is { type: "text"; text: string } =>
+						part.type === "text",
+				)
+				.map((part) => part.text)
+				.join("\n");
+			let sections: Record<string, string>;
+			try {
+				sections = parseStandupSections(generated);
+			} catch (error) {
+				return note(ctx, `Could not parse Standup draft: ${errMsg(error)}`, "error");
+			}
+			const edited = await ctx.ui.editor(
+				`Review ${projectKey} Standup draft`,
+				JSON.stringify(sections, null, 2),
+			);
+			if (!edited) return;
+			try {
+				sections = parseStandupSections(edited);
+			} catch (error) {
+				return note(ctx, `Standup draft is invalid: ${errMsg(error)}`, "error");
+			}
+			const confirmed = await ctx.ui.confirm(
+				"Open this draft in Takonaut?",
+				"The reviewed draft will be stored for 15 minutes and opened in your authenticated browser. It is not submitted automatically.",
+			);
+			if (!confirmed) return;
+			const draft = await conn.createBridgeStandupDraft({ projectKey, sections });
+			const url = new URL(draft.draft_url, c.serverUrl).toString();
+			openUrl(url);
+			note(ctx, `Standup draft opened in Takonaut: ${url}`);
+		},
+	});
+
 	pi.registerCommand("tako-tasks", {
-		description: "List Takonaut work assigned to you that you can self-start",
+		description: "List all Takonaut work assigned to you with startability",
 		handler: async (_args, ctx) => {
 			const conn = ensure(ctx);
 			if (!conn) return;
 			try {
 				const { tasks } = await conn.listStartableTasks();
-				if (!tasks?.length)
-					return note(ctx, "No startable work is assigned to you.");
+				if (!tasks?.length) return note(ctx, "No work is assigned to you.");
+				const ready = tasks.filter((task) => task.startability.startable).length;
+				const blocked = tasks.length - ready;
 				note(
 					ctx,
-					"Startable work:\n" +
+					`Assigned work: ${tasks.length} total · ${ready} ready · ${blocked} blocked\n` +
 						tasks
-							.map(
-								(task) =>
-									`  ${task.task_key}  ${task.task_title}  (${task.project_key})`,
-							)
+							.map((task) => {
+								const status = task.startability.startable
+									? "READY  "
+									: "BLOCKED";
+								const reason = task.startability.startable
+									? ""
+									: ` — ${formatStartabilityReasons(task.startability.reasons)}`;
+								return `  ${status}  ${task.task_key}  ${task.task_title}  (${task.project_key})${reason}`;
+							})
 							.join("\n"),
 				);
 			} catch (error) {
@@ -626,7 +879,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					clientId,
 					sessionId,
 					sessionLabel: `${hostname()} — ${taskKey}`,
-					extensionVersion: "0.3.0",
+					extensionVersion: "0.4.0",
 					manifestSchemaVersion: 2,
 					idempotencyKey: `start:${sessionId}:${startNonce}`,
 					baseRefOverrides,
@@ -671,7 +924,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					organizationId: c.orgId,
 					projectId: started.project_id,
 					minimumRevision: projectSync?.acceptedRevision ?? 0,
-					extensionVersion: "0.3.0",
+					extensionVersion: "0.4.0",
 				});
 				const capabilityExpansion = capabilityExpansionRequired(
 					projectSync?.capabilityEnvelope ?? null,
@@ -2018,9 +2271,12 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		},
 	);
 
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
 		const c = cfg ?? (cfg = loadConfig());
 		if (!c) return;
+		const panelSettings = loadPanelSettings(c.configPath);
+		await refreshPanel(ctx, c, panelSettings);
+		startPanelRefresh(ctx, c, panelSettings);
 		const active = loadActiveAgenticRun(undefined, c.orgId, piSessionId(ctx));
 		if (!active) return;
 		note(
@@ -2037,7 +2293,9 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		}
 	});
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (_event, ctx) => {
+		stopPanel();
+		ctx.ui?.setWidget?.("tako-bridge-panel", undefined);
 		stopAgentTelemetry();
 		if (client) {
 			await client.close();
@@ -2088,18 +2346,96 @@ async function verifyRepository(
 	return preflight;
 }
 
-function startabilityMessage(context: BridgeTaskContext): string {
-	const messages: Record<string, string> = {
-		not_assigned: "This work item is not assigned to you.",
-		archived: "This work item is archived.",
-		terminal_stage: "This work item is already in a terminal Stage.",
-		active_run_exists:
-			"This work item already has an active Tako Bridge run. Reconcile or abandon it first.",
-	};
+const STARTABILITY_REASON_MESSAGES: Record<string, string> = {
+	not_assigned: "This work item is not assigned to you.",
+	archived: "This work item is archived.",
+	terminal_stage: "This work item is already in a terminal Stage.",
+	missing_bridge_run_permission: "You do not have Bridge access for this Project.",
+	project_agent_setup_required: "Project Agent Setup is not published.",
+	project_agent_playbook_required: "Default Playbook is not published.",
+	active_run_exists:
+		"This work item already has an active Tako Bridge run. Reconcile it first.",
+};
+
+function formatStartabilityReasons(reasons: string[]): string {
 	return (
-		context.startability.reasons
-			.map((reason) => messages[reason] ?? reason)
+		reasons
+			.map((reason) => STARTABILITY_REASON_MESSAGES[reason] ?? reason)
 			.join(" ") || "This work item cannot be started."
+	);
+}
+
+function startabilityMessage(context: BridgeTaskContext): string {
+	return formatStartabilityReasons(context.startability.reasons);
+}
+
+function buildStandupConversation(entries: unknown[]): string {
+	const sections: string[] = [];
+	for (const entry of entries) {
+		if (!entry || typeof entry !== "object") continue;
+		const message = (entry as { type?: string; message?: any }).message;
+		if ((entry as { type?: string }).type !== "message" || !message) continue;
+		if (message.role !== "user" && message.role !== "assistant") continue;
+		const parts = Array.isArray(message.content) ? message.content : [];
+		const text = parts
+			.filter((part: any) => part?.type === "text" && typeof part.text === "string")
+			.map((part: any) => part.text)
+			.join("\n")
+			.trim();
+		if (text) sections.push(`${message.role === "user" ? "User" : "Assistant"}: ${text}`);
+		for (const part of parts) {
+			if (part?.type === "toolCall" && typeof part.name === "string") {
+				sections.push(`Tool: ${part.name} ${JSON.stringify(part.arguments ?? {})}`);
+			}
+		}
+	}
+	return sections.join("\n\n").slice(-40_000);
+}
+
+function buildStandupDraftPrompt(
+	projectKey: string,
+	conversation: string,
+	git: { log: string; status: string; diff: string },
+): string {
+	return [
+		`Draft a concise daily Standup for project ${projectKey}.`,
+		"Use only evidence below. Do not invent completed work or blockers.",
+		"Return only JSON with string keys yesterday, today, blockers, and other.",
+		"Keep each section under 2,000 characters.",
+		"",
+		"<pi-session>",
+		conversation || "No conversation evidence.",
+		"</pi-session>",
+		"<git-log>",
+		git.log,
+		"</git-log>",
+		"<git-status>",
+		git.status,
+		"</git-status>",
+		"<git-diff-stat>",
+		git.diff,
+		"</git-diff-stat>",
+	].join("\n");
+}
+
+function parseStandupSections(value: string): Record<string, string> {
+	const match = value.match(/\{[\s\S]*\}/);
+	if (!match) throw new Error("expected JSON object");
+	let parsed: Record<string, unknown>;
+	try {
+		parsed = JSON.parse(match[0]) as Record<string, unknown>;
+	} catch {
+		throw new Error("expected valid JSON");
+	}
+	const keys = ["yesterday", "today", "blockers", "other"];
+	if (
+		Object.keys(parsed).some((key) => !keys.includes(key)) ||
+		keys.some((key) => typeof parsed[key] !== "string")
+	) {
+		throw new Error("expected yesterday, today, blockers, and other strings");
+	}
+	return Object.fromEntries(
+		keys.map((key) => [key, String(parsed[key]).trim().slice(0, 6_000)]),
 	);
 }
 

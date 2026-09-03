@@ -26,6 +26,25 @@ export interface ProjectRepoMapping {
 	linkedAt: string;
 }
 
+export interface PanelSettings {
+	visible: boolean;
+	showRun: boolean;
+	showTasks: boolean;
+	showStandup: boolean;
+	taskLimit: 1 | 3 | 5 | 10;
+	refreshSeconds: 0 | 15 | 30 | 60;
+	standupProjectKey?: string;
+}
+
+export const DEFAULT_PANEL_SETTINGS: PanelSettings = {
+	visible: true,
+	showRun: true,
+	showTasks: true,
+	showStandup: true,
+	taskLimit: 3,
+	refreshSeconds: 30,
+};
+
 export interface TakonautConfig {
 	serverUrl: string;
 	apiKey: string;
@@ -59,6 +78,7 @@ interface BridgeFile {
 	repoRoot?: string;
 	protectedBranches?: string[];
 	projectRepos?: Record<string, ProjectRepoMapping>;
+	panel?: Partial<PanelSettings>;
 	// v1 migration-only fields. They are removed from bridge.json after migration.
 	mcp?: {
 		serverUrl?: string;
@@ -81,6 +101,48 @@ export const BRIDGE_CREDENTIALS_PATH = join(
 
 export function credentialsPathForConfig(configPath: string): string {
 	return join(dirname(configPath), "credentials.json");
+}
+
+function normalizedPanelSettings(
+	value: Partial<PanelSettings> | undefined,
+): PanelSettings {
+	const taskLimit = [1, 3, 5, 10].includes(Number(value?.taskLimit))
+		? (Number(value?.taskLimit) as PanelSettings["taskLimit"])
+		: DEFAULT_PANEL_SETTINGS.taskLimit;
+	const refreshSeconds = [0, 15, 30, 60].includes(Number(value?.refreshSeconds))
+		? (Number(value?.refreshSeconds) as PanelSettings["refreshSeconds"])
+		: DEFAULT_PANEL_SETTINGS.refreshSeconds;
+	const standupProjectKey = value?.standupProjectKey?.trim().toUpperCase();
+	return {
+		visible: value?.visible ?? DEFAULT_PANEL_SETTINGS.visible,
+		showRun: value?.showRun ?? DEFAULT_PANEL_SETTINGS.showRun,
+		showTasks: value?.showTasks ?? DEFAULT_PANEL_SETTINGS.showTasks,
+		showStandup: value?.showStandup ?? DEFAULT_PANEL_SETTINGS.showStandup,
+		taskLimit,
+		refreshSeconds,
+		...(standupProjectKey ? { standupProjectKey } : {}),
+	};
+}
+
+export function loadPanelSettings(
+	path: string = BRIDGE_CONFIG_PATH,
+): PanelSettings {
+	return normalizedPanelSettings(readJson<BridgeFile>(path, "Bridge config")?.panel);
+}
+
+export function savePanelSettings(
+	settings: PanelSettings,
+	path: string = BRIDGE_CONFIG_PATH,
+): void {
+	const current = readJson<BridgeFile>(path, "Bridge config") ?? {};
+	writeJson(
+		path,
+		sanitizedBridge({
+			...current,
+			panel: normalizedPanelSettings(settings),
+		}),
+		false,
+	);
 }
 
 function mode(path: string): number {
@@ -174,6 +236,7 @@ function sanitizedBridge(file: BridgeFile): BridgeFile {
 			? { protectedBranches: file.protectedBranches }
 			: {}),
 		...(file.projectRepos ? { projectRepos: file.projectRepos } : {}),
+		...(file.panel ? { panel: normalizedPanelSettings(file.panel) } : {}),
 	};
 	return clean;
 }

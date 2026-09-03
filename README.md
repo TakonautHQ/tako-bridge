@@ -21,7 +21,7 @@ Tako Bridge refuses to start work when repository identity, GitHub access, Git i
 Install a pinned Git tag so updates are deliberate:
 
 ```bash
-pi install git:github.com/TakonautHQ/tako-bridge@v0.3.0
+pi install git:github.com/TakonautHQ/tako-bridge@v0.4.0
 ```
 
 Start Pi, then run:
@@ -82,7 +82,15 @@ Human decisions remain in Takonaut's Review queue. Approval completes the govern
 | `/tako-login [api-base-url]` | Connect through device authorization. HTTPS is required except for explicit loopback development. |
 | `/tako-status` | Reconcile this Pi session with the durable Agentic Delivery run. |
 | `/tako-reconnect` | Explicitly authorize a replacement personal Pi key for retained state. |
-| `/tako-tasks` | List assigned Takonaut work that can be started. |
+| `/tako-tasks` | List every assigned work item, including readiness and reasons blocked items cannot start. |
+| `/tako-panel` | Configure the persistent Tako Bridge panel above Pi's prompt editor. |
+| `/tako-standup` | Draft a Standup from the current Pi session and bounded Git activity, then open the reviewed draft in Takonaut. |
+
+### Pi status panel and Standup draft
+
+In interactive Pi sessions, Tako Bridge shows a compact panel above the prompt editor with connection state, the active run, assigned/ready/blocked counts, task eligibility, and the selected Project's Standup status. The panel refreshes every 30 seconds by default. Use `/tako-panel` to show or hide sections, choose the number of task rows, change the refresh interval, and select the Project whose Standup status is tracked. Preferences are stored in the non-secret `~/.takonaut/bridge.json` file.
+
+`/tako-standup` asks before sending the current Pi conversation and bounded Git log/status summaries to the developer's configured Pi model. The generated sections open in an editor for review. Only after a second confirmation does Bridge upload the reviewed draft to Takonaut for 15 minutes and open the authenticated Standup form in the system browser. It never submits the Standup automatically.
 
 ### Agentic Delivery
 
@@ -120,7 +128,7 @@ Bearer credentials are stored separately from non-secret repository mappings:
 
 ```text
 ~/.takonaut/credentials.json  # owner-only 0600
-~/.takonaut/bridge.json       # non-secret mappings and branch settings
+~/.takonaut/bridge.json       # non-secret mappings, panel settings, and branch settings
 ```
 
 Agentic Delivery state is scoped by organization and Pi session:
@@ -141,6 +149,8 @@ While an Agentic Delivery run is active, Tako Bridge sends an operational snapsh
 - start, last-activity, and observation timestamps
 
 It does **not** include repository source, prompts, raw transcripts, tool output, diffs, credentials, or local absolute paths. Reporting stops when the run is terminal, the feature is disabled, or the extension session ends. Lifecycle observation is part of an active governed run and has no independent opt-out; do not start a run when organizational policy does not permit this metadata.
+
+Standup drafting is separate from operational telemetry. `/tako-standup` explicitly asks before sending the current conversation and bounded Git summaries to the configured Pi model. Only the draft the developer reviews and confirms is uploaded to Takonaut; the underlying conversation and Git output are not uploaded by Bridge.
 
 Diagnostic uploads are separate, user-invoked actions. `/tako-diagnostics` reads only one bounded regular file inside a managed Code Workspace, rejects symlinks and high-risk material, redacts secrets and local paths, previews the action, and requires confirmation.
 

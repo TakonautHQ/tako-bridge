@@ -146,12 +146,12 @@ describe("Pi package manifest", () => {
 
 	it("uses the package version for runtime identity and manifest negotiation", () => {
 		const version = readPackage().version;
-		expect(readFileSync(join(packageRoot, "src", "client.ts"), "utf-8")).toContain(
-			`version: "${version}"`,
-		);
-		expect(readFileSync(join(packageRoot, "src", "index.ts"), "utf-8")).toContain(
-			`extensionVersion: "${version}"`,
-		);
+		expect(
+			readFileSync(join(packageRoot, "src", "client.ts"), "utf-8"),
+		).toContain(`version: "${version}"`);
+		expect(
+			readFileSync(join(packageRoot, "src", "index.ts"), "utf-8"),
+		).toContain(`extensionVersion: "${version}"`);
 	});
 
 	it("packs only the Bridge runtime and public documentation", () => {

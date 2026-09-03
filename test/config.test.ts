@@ -19,6 +19,7 @@ import {
 	saveProjectRepoMapping,
 	selectBridgeConfigPath,
 } from "../src/config";
+import * as bridgeConfig from "../src/config";
 
 const CREDS = {
 	serverUrl: "https://x.test/mcp/",
@@ -98,6 +99,52 @@ describe("secure Bridge profiles", () => {
 			"org-2",
 		]);
 		expect(credentials.profiles["org-1"].apiKey).toBe("key-new");
+	});
+
+	it("persists bounded panel preferences in the non-secret Bridge file", () => {
+		expect(bridgeConfig.loadPanelSettings(path)).toEqual({
+			visible: true,
+			showRun: true,
+			showTasks: true,
+			showStandup: true,
+			taskLimit: 3,
+			refreshSeconds: 30,
+		});
+
+		bridgeConfig.savePanelSettings(
+			{
+				visible: false,
+				showRun: false,
+				showTasks: true,
+				showStandup: true,
+				taskLimit: 5,
+				refreshSeconds: 60,
+				standupProjectKey: "PAY",
+			},
+			path,
+		);
+
+		expect(bridgeConfig.loadPanelSettings(path)).toEqual({
+			visible: false,
+			showRun: false,
+			showTasks: true,
+			showStandup: true,
+			taskLimit: 5,
+			refreshSeconds: 60,
+			standupProjectKey: "PAY",
+		});
+		expect(JSON.parse(readFileSync(path, "utf-8"))).toEqual({
+			version: 2,
+			panel: {
+				visible: false,
+				showRun: false,
+				showTasks: true,
+				showStandup: true,
+				taskLimit: 5,
+				refreshSeconds: 60,
+				standupProjectKey: "PAY",
+			},
+		});
 	});
 
 	it("stores repository mappings only in the non-secret file", () => {
