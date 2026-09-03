@@ -615,11 +615,15 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 				other: "",
 			},
 		});
-		expect(pi.exec).toHaveBeenCalledWith(
-			"open",
-			["https://takonaut.test/projects/PAY/standup?bridge_draft=token-1"],
-			undefined,
-		);
+		const url = "https://takonaut.test/projects/PAY/standup?bridge_draft=token-1";
+		const opener =
+			process.platform === "darwin"
+				? "open"
+				: process.platform === "win32"
+					? "cmd"
+					: "xdg-open";
+		const openerArgs = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+		expect(pi.exec).toHaveBeenCalledWith(opener, openerArgs, undefined);
 	});
 
 	it("lets the developer hide and persist the Tako panel", async () => {
@@ -762,7 +766,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			clientId: "client-1",
 			sessionId: "pi-session-1",
 			sessionLabel: expect.stringContaining("PAY-142"),
-			extensionVersion: "0.4.0",
+			extensionVersion: "0.4.1",
 			manifestSchemaVersion: 2,
 			baseRefOverrides: [],
 			idempotencyKey: expect.stringMatching(

@@ -21,7 +21,7 @@ Tako Bridge refuses to start work when repository identity, GitHub access, Git i
 Install a pinned Git tag so updates are deliberate:
 
 ```bash
-pi install git:github.com/TakonautHQ/tako-bridge@v0.4.0
+pi install git:github.com/TakonautHQ/tako-bridge@v0.4.1
 ```
 
 Start Pi, then run:
