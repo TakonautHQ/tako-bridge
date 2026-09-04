@@ -63,6 +63,38 @@ describe("TakonautClient transport", () => {
 		expect(mocks.connect).toHaveBeenCalledOnce();
 	});
 
+	it("passes bounded transport timeouts for synchronization calls", async () => {
+		const client = new TakonautClient(cfg);
+
+		await Reflect.apply(client.listStartableTasks, client, ["", 10_000]);
+		await Reflect.apply(client.getAgenticDeliveryStatus, client, [
+			"pi-session-1",
+			"run-1",
+			10_000,
+		]);
+		await Reflect.apply(client.reportAgentTelemetry, client, [
+			{
+				runId: "run-1",
+				sessionId: "pi-session-1",
+				sequence: 1,
+				observedAt: "2030-01-01T00:00:00.000Z",
+				instances: [],
+			},
+			10_000,
+		]);
+
+		expect(
+			mocks.callTool.mock.calls.map(([, resultSchema, options]) => ({
+				resultSchema,
+				options,
+			})),
+		).toEqual([
+			{ resultSchema: undefined, options: { timeout: 10_000 } },
+			{ resultSchema: undefined, options: { timeout: 10_000 } },
+			{ resultSchema: undefined, options: { timeout: 10_000 } },
+		]);
+	});
+
 	it("parses successful MCP responses larger than 2,000 characters", async () => {
 		const response = {
 			tasks: [

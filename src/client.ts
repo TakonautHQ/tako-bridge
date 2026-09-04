@@ -27,6 +27,11 @@ export interface StartableTask {
 	task_key: string;
 	task_title: string;
 	project_key: string;
+	task_path?: string;
+	workflow_mode?: "sprint" | "kanban";
+	sprint_name?: string | null;
+	stage_name?: string;
+	stage_group?: string;
 	startability: { startable: boolean; reasons: string[] };
 }
 
@@ -248,7 +253,7 @@ export class TakonautClient {
 
 	constructor(private cfg: TakonautConfig) {
 		this.client = new Client(
-			{ name: "tako-bridge", version: "0.4.9" },
+			{ name: "tako-bridge", version: "0.4.10" },
 			{ capabilities: {} },
 		);
 	}
@@ -272,13 +277,28 @@ export class TakonautClient {
 	private async call(
 		name: string,
 		args: Record<string, unknown>,
+		timeoutMs?: number,
 	): Promise<any> {
 		await this.ensure();
-		return parseToolJson(await this.client.callTool({ name, arguments: args }));
+		const request = { name, arguments: args };
+		const response =
+			timeoutMs === undefined
+				? await this.client.callTool(request)
+				: await this.client.callTool(request, undefined, {
+						timeout: timeoutMs,
+					});
+		return parseToolJson(response);
 	}
 
-	listStartableTasks(projectKey = ""): Promise<{ tasks: StartableTask[] }> {
-		return this.call("list_startable_tasks", { project_key: projectKey });
+	listStartableTasks(
+		projectKey = "",
+		timeoutMs?: number,
+	): Promise<{ tasks: StartableTask[] }> {
+		return this.call(
+			"list_startable_tasks",
+			{ project_key: projectKey },
+			timeoutMs,
+		);
 	}
 
 	getBridgeStandupStatus(projectKey: string): Promise<{
@@ -341,11 +361,19 @@ export class TakonautClient {
 		});
 	}
 
-	getAgenticDeliveryStatus(sessionId: string, runId = ""): Promise<any> {
-		return this.call("get_agentic_delivery_status", {
-			session_id: sessionId,
-			run_id: runId,
-		});
+	getAgenticDeliveryStatus(
+		sessionId: string,
+		runId = "",
+		timeoutMs?: number,
+	): Promise<any> {
+		return this.call(
+			"get_agentic_delivery_status",
+			{
+				session_id: sessionId,
+				run_id: runId,
+			},
+			timeoutMs,
+		);
 	}
 
 	reauthorizeAgenticDeliverySession(input: {
@@ -751,22 +779,29 @@ export class TakonautClient {
 		});
 	}
 
-	reportAgentTelemetry(snapshot: AgentTelemetrySnapshot): Promise<any> {
-		return this.call("report_agentic_delivery_telemetry", {
-			run_id: snapshot.runId,
-			session_id: snapshot.sessionId,
-			sequence: snapshot.sequence,
-			observed_at: snapshot.observedAt,
-			instances: snapshot.instances.map((instance) => ({
-				instance_key: instance.instanceKey,
-				parent_instance_key: instance.parentInstanceKey,
-				label: instance.label,
-				role: instance.role,
-				reported_status: instance.reportedStatus,
-				started_at: instance.startedAt,
-				last_activity_at: instance.lastActivityAt,
-			})),
-		});
+	reportAgentTelemetry(
+		snapshot: AgentTelemetrySnapshot,
+		timeoutMs?: number,
+	): Promise<any> {
+		return this.call(
+			"report_agentic_delivery_telemetry",
+			{
+				run_id: snapshot.runId,
+				session_id: snapshot.sessionId,
+				sequence: snapshot.sequence,
+				observed_at: snapshot.observedAt,
+				instances: snapshot.instances.map((instance) => ({
+					instance_key: instance.instanceKey,
+					parent_instance_key: instance.parentInstanceKey,
+					label: instance.label,
+					role: instance.role,
+					reported_status: instance.reportedStatus,
+					started_at: instance.startedAt,
+					last_activity_at: instance.lastActivityAt,
+				})),
+			},
+			timeoutMs,
+		);
 	}
 
 	async close(): Promise<void> {

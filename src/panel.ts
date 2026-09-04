@@ -28,6 +28,25 @@ interface PanelRun {
 	status?: string;
 }
 
+export type SyncDebugState = "idle" | "running" | "ok" | "error" | "timeout";
+
+export interface SyncOperationDebug {
+	state: SyncDebugState;
+	attempt: number;
+	startedAt: string | null;
+	durationMs: number | null;
+	skipped: number;
+	errorCode: string | null;
+	sequence?: number;
+}
+
+export interface BridgePanelDebugData {
+	panel: SyncOperationDebug;
+	telemetry: SyncOperationDebug;
+	reconcile: SyncOperationDebug;
+	nextRefreshSeconds: number | null;
+}
+
 export interface BridgePanelData {
 	run: PanelRun | null;
 	showRun: boolean;
@@ -37,6 +56,7 @@ export interface BridgePanelData {
 	standupStatus: "pending" | "submitted" | null;
 	tasks: StartableTask[];
 	taskLimit: number;
+	debug?: BridgePanelDebugData;
 }
 
 interface PanelSegment {
@@ -234,8 +254,14 @@ function buildSections(
 		});
 	}
 	if (data.showTasks) {
-		const nextTask =
-			data.tasks.find((task) => task.startability.startable) ?? data.tasks[0];
+		const stageCounts = new Map<string, number>();
+		for (const task of data.tasks) {
+			const stageName = task.stage_name ?? "Unknown Stage";
+			stageCounts.set(stageName, (stageCounts.get(stageName) ?? 0) + 1);
+		}
+		const stageSummary = [...stageCounts]
+			.map(([stageName, count]) => `${stageName} ${count}`)
+			.join(" · ");
 		sections.push({
 			label: "WORK",
 			weight: 35,
@@ -246,10 +272,8 @@ function buildSections(
 			],
 			secondary: [
 				{
-					text: nextTask
-						? `${nextTask.startability.startable ? "Next" : "Review"} ${nextTask.task_key}`
-						: "No assigned work",
-					tone: nextTask?.startability.startable ? "accent" : "muted",
+					text: stageSummary || "No current work",
+					tone: stageSummary ? "text" : "muted",
 				},
 			],
 		});
@@ -297,6 +321,78 @@ function stackedSection(
 		{ text: " · ", tone: "dim" },
 		...section.secondary,
 	]);
+}
+
+function debugTone(state: SyncDebugState): PanelTone {
+	if (state === "ok") return "success";
+	if (state === "running") return "accent";
+	if (state === "error" || state === "timeout") return "warning";
+	return "muted";
+}
+
+function debugOperationSegments(
+	label: string,
+	operation: SyncOperationDebug,
+): PanelSegment[] {
+	const startedAt = operation.startedAt?.slice(11, 19) ?? "never";
+	const details = [
+		`attempt ${operation.attempt}`,
+		`started ${startedAt}`,
+		...(operation.durationMs === null ? [] : [`${operation.durationMs}ms`]),
+		...(operation.sequence === undefined ? [] : [`seq ${operation.sequence}`]),
+		`skipped ${operation.skipped}`,
+	];
+	return [
+		{ text: ` ${label.padEnd(11)} `, tone: "dim", strong: true },
+		{ text: operation.state, tone: debugTone(operation.state), strong: true },
+		{ text: ` · ${details.join(" · ")}`, tone: "muted" },
+	];
+}
+
+function renderDebugBlock(
+	theme: PanelTheme,
+	width: number,
+	debug: BridgePanelDebugData,
+): string[] {
+	const errors = [debug.panel, debug.telemetry, debug.reconcile]
+		.map((operation) => operation.errorCode)
+		.filter((errorCode): errorCode is string => Boolean(errorCode));
+	const lines = [
+		separator(theme, width),
+		framedLine(theme, width, [
+			{ text: " DEBUG SYNC", tone: "accent", strong: true },
+		]),
+		framedLine(theme, width, debugOperationSegments("PANEL", debug.panel)),
+		framedLine(
+			theme,
+			width,
+			debugOperationSegments("TELEMETRY", debug.telemetry),
+		),
+		framedLine(
+			theme,
+			width,
+			debugOperationSegments("RECONCILE", debug.reconcile),
+		),
+		framedLine(theme, width, [
+			{ text: " NEXT REFRESH  ", tone: "dim", strong: true },
+			{
+				text:
+					debug.nextRefreshSeconds === null
+						? "manual"
+						: `${debug.nextRefreshSeconds}s`,
+				tone: "muted",
+			},
+		]),
+	];
+	if (errors.length > 0) {
+		lines.push(
+			framedLine(theme, width, [
+				{ text: " LAST ERROR  ", tone: "dim", strong: true },
+				{ text: errors[0], tone: "warning" },
+			]),
+		);
+	}
+	return lines;
 }
 
 function nextAction(data: BridgePanelData): {
@@ -407,9 +503,17 @@ export function createBridgePanelWidget(
 							},
 							{ text: `${task.task_key}  `, tone: "accent", strong: true },
 							{ text: task.task_title, tone: "text" },
+							{
+								text: task.stage_name ? ` · ${task.stage_name}` : "",
+								tone: "muted",
+							},
 						]),
 					);
 				}
+			}
+
+			if (data.debug) {
+				lines.push(...renderDebugBlock(theme, resolvedWidth, data.debug));
 			}
 
 			const hiddenTasks = Math.max(0, data.tasks.length - data.taskLimit);
@@ -440,11 +544,12 @@ export function createBridgePanelWidget(
 export function createBridgePanelErrorWidget(
 	message: string,
 	theme: PanelTheme,
+	debug?: BridgePanelDebugData,
 ) {
 	return {
 		render(width: number): string[] {
 			const resolvedWidth = panelWidth(width);
-			return [
+			const lines = [
 				framedRule(
 					theme,
 					resolvedWidth,
@@ -463,6 +568,9 @@ export function createBridgePanelErrorWidget(
 				framedLine(theme, resolvedWidth, [
 					{ text: ` ${message}`, tone: "muted" },
 				]),
+			];
+			if (debug) lines.push(...renderDebugBlock(theme, resolvedWidth, debug));
+			lines.push(
 				framedRule(
 					theme,
 					resolvedWidth,
@@ -475,7 +583,8 @@ export function createBridgePanelErrorWidget(
 					],
 					[{ text: "─", tone: "borderMuted" }],
 				),
-			];
+			);
+			return lines;
 		},
 		invalidate() {},
 	};

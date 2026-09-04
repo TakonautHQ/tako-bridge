@@ -31,6 +31,7 @@ export interface PanelSettings {
 	showRun: boolean;
 	showTasks: boolean;
 	showStandup: boolean;
+	debug: boolean;
 	taskLimit: 1 | 3 | 5 | 10;
 	refreshSeconds: 0 | 15 | 30 | 60;
 	standupProjectKey?: string;
@@ -41,6 +42,7 @@ export const DEFAULT_PANEL_SETTINGS: PanelSettings = {
 	showRun: true,
 	showTasks: true,
 	showStandup: true,
+	debug: false,
 	taskLimit: 3,
 	refreshSeconds: 30,
 };
@@ -118,6 +120,7 @@ function normalizedPanelSettings(
 		showRun: value?.showRun ?? DEFAULT_PANEL_SETTINGS.showRun,
 		showTasks: value?.showTasks ?? DEFAULT_PANEL_SETTINGS.showTasks,
 		showStandup: value?.showStandup ?? DEFAULT_PANEL_SETTINGS.showStandup,
+		debug: value?.debug ?? DEFAULT_PANEL_SETTINGS.debug,
 		taskLimit,
 		refreshSeconds,
 		...(standupProjectKey ? { standupProjectKey } : {}),

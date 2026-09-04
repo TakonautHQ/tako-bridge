@@ -43,6 +43,7 @@ const mocks = vi.hoisted(() => ({
 		showRun: true,
 		showTasks: true,
 		showStandup: true,
+		debug: false,
 		taskLimit: 3 as 1 | 3 | 5 | 10,
 		refreshSeconds: 30 as 0 | 15 | 30 | 60,
 		standupProjectKey: undefined as string | undefined,
@@ -194,6 +195,7 @@ vi.mock("../src/diagnostics", () => ({
 }));
 
 vi.mock("../src/telemetry", () => ({
+	AGENT_TELEMETRY_TIMEOUT_MS: 10_000,
 	startAgentTelemetryReporter: mocks.startAgentTelemetryReporter,
 	isFeatureDisabledError: (error: unknown) =>
 		String(error).includes("feature_disabled:agent_profiles_v2"),
@@ -209,10 +211,12 @@ function commandContext(notify = vi.fn()) {
 		ui: {
 			notify,
 			setWidget: vi.fn(),
+			custom: vi.fn(async (): Promise<string | null> => null),
 			select: vi.fn(async (): Promise<string | undefined> => undefined),
 			confirm: vi.fn(async () => true),
 			editor: vi.fn(
-				async (_title: string, value: string): Promise<string | undefined> => value,
+				async (_title: string, value: string): Promise<string | undefined> =>
+					value,
 			),
 			input: vi.fn(
 				async (
@@ -237,6 +241,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			showRun: true,
 			showTasks: true,
 			showStandup: true,
+			debug: false,
 			taskLimit: 3,
 			refreshSeconds: 30,
 			standupProjectKey: undefined,
@@ -634,7 +639,8 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 				other: "",
 			},
 		});
-		const url = "https://takonaut.test/projects/PAY/standup?bridge_draft=token-1";
+		const url =
+			"https://takonaut.test/projects/PAY/standup?bridge_draft=token-1";
 		const opener =
 			process.platform === "darwin"
 				? "open"
@@ -649,7 +655,9 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 				!process.env.DISPLAY &&
 				!process.env.WAYLAND_DISPLAY);
 		if (headless) {
-			expect(pi.exec.mock.calls.some(([command]) => command === opener)).toBe(false);
+			expect(pi.exec.mock.calls.some(([command]) => command === opener)).toBe(
+				false,
+			);
 		} else {
 			expect(pi.exec).toHaveBeenCalledWith(opener, openerArgs, undefined);
 		}
@@ -673,6 +681,81 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			"tako-bridge-panel",
 			undefined,
 		);
+	});
+
+	it("lets the developer persist detailed panel Debug mode", async () => {
+		const { commands } = setup();
+		const ctx = { ...commandContext(), mode: "tui" };
+		ctx.ui.select = vi
+			.fn()
+			.mockResolvedValueOnce("Debug: off")
+			.mockResolvedValueOnce("Done");
+
+		await commands.get("tako-panel")?.("", ctx);
+
+		expect(mocks.savePanelSettings).toHaveBeenCalledWith(
+			expect.objectContaining({ debug: true }),
+			"/home/dev/.takonaut/bridge.json",
+		);
+	});
+
+	it("lets the developer choose the maximum panel task rows", async () => {
+		const { commands } = setup();
+		const ctx = { ...commandContext(), mode: "tui" };
+		ctx.ui.select = vi
+			.fn()
+			.mockResolvedValueOnce("Task rows: 3")
+			.mockResolvedValueOnce("10")
+			.mockResolvedValueOnce("Done");
+
+		await commands.get("tako-panel")?.("", ctx);
+
+		expect(ctx.ui.select).toHaveBeenCalledWith("Task rows", [
+			"1",
+			"3",
+			"5",
+			"10",
+		]);
+		expect(mocks.savePanelSettings).toHaveBeenCalledWith(
+			expect.objectContaining({ taskLimit: 10 }),
+			"/home/dev/.takonaut/bridge.json",
+		);
+	});
+
+	it("times out a stuck panel sync and exposes its lifecycle in Debug mode", async () => {
+		vi.useFakeTimers();
+		mocks.panelSettings = {
+			...mocks.panelSettings,
+			debug: true,
+			refreshSeconds: 15,
+		};
+		mocks.listStartableTasks
+			.mockImplementationOnce(() => new Promise(() => {}))
+			.mockResolvedValueOnce({ tasks: [] });
+		const { events } = setup();
+		const ctx = { ...commandContext(), mode: "tui" };
+
+		try {
+			const startup = events.get("session_start")?.({}, ctx);
+			await Promise.resolve();
+			expect(renderPanel(ctx).join("\n")).toContain("PANEL       running");
+
+			await vi.advanceTimersByTimeAsync(10_000);
+			await startup;
+			const timedOut = renderPanel(ctx).join("\n");
+			expect(timedOut).toContain("PANEL       timeout");
+			expect(timedOut).toContain("panel_refresh_timeout");
+			expect(mocks.listStartableTasks).toHaveBeenCalledTimes(1);
+			expect(mocks.listStartableTasks).toHaveBeenNthCalledWith(1, "", 10_000);
+			expect(mocks.close).not.toHaveBeenCalled();
+
+			await vi.advanceTimersByTimeAsync(15_000);
+			expect(mocks.listStartableTasks).toHaveBeenCalledTimes(2);
+			expect(renderPanel(ctx).join("\n")).toContain("PANEL       ok");
+		} finally {
+			await events.get("session_shutdown")?.({}, ctx);
+			vi.useRealTimers();
+		}
 	});
 
 	it("shows a compact assigned-work panel above the Pi editor", async () => {
@@ -717,19 +800,29 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		await events.get("session_shutdown")?.({}, ctx);
 	});
 
-	it("lists every assigned task with readiness and ineligibility reasons", async () => {
+	it("opens selected current work from a searchable TUI popup", async () => {
 		mocks.listStartableTasks.mockResolvedValueOnce({
 			tasks: [
 				{
 					task_key: "PAY-142",
 					task_title: "Handle expired sessions",
 					project_key: "PAY",
+					task_path: "/projects/PAY/items/task-1",
+					workflow_mode: "sprint",
+					sprint_name: "Current Sprint",
+					stage_name: "Development",
+					stage_group: "in_progress",
 					startability: { startable: true, reasons: [] },
 				},
 				{
 					task_key: "PAY-143",
 					task_title: "Rotate credentials",
 					project_key: "PAY",
+					task_path: "/projects/PAY/items/task-2",
+					workflow_mode: "kanban",
+					sprint_name: null,
+					stage_name: "Review",
+					stage_group: "in_progress",
 					startability: {
 						startable: false,
 						reasons: ["project_agent_playbook_required"],
@@ -737,17 +830,42 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 				},
 			],
 		});
-		const { commands } = setup();
+		const { commands, pi } = setup();
 		const notify = vi.fn();
+		const ctx = { ...commandContext(notify), mode: "tui" };
+		ctx.ui.custom.mockResolvedValueOnce("PAY-142");
 
-		await commands.get("tako-tasks")?.("", commandContext(notify));
+		await commands.get("tako-tasks")?.("", ctx);
 
-		expect(notify).toHaveBeenCalledWith(
-			"Assigned work: 2 total · 1 ready · 1 blocked\n" +
-				"  READY    PAY-142  Handle expired sessions  (PAY)\n" +
-				"  BLOCKED  PAY-143  Rotate credentials  (PAY) — Default Playbook is not published.",
-			"info",
+		expect(ctx.ui.custom).toHaveBeenCalledWith(
+			expect.any(Function),
+			expect.objectContaining({
+				overlay: true,
+				overlayOptions: expect.objectContaining({ anchor: "center" }),
+			}),
 		);
+		const url = "https://takonaut.test/projects/PAY/items/task-1";
+		expect(notify).toHaveBeenCalledWith(`Opening PAY-142: ${url}`, "info");
+		const opener =
+			process.platform === "darwin"
+				? "open"
+				: process.platform === "win32"
+					? "cmd"
+					: "xdg-open";
+		const headless =
+			Boolean(process.env.SSH_CONNECTION || process.env.SSH_TTY) ||
+			(process.platform === "linux" &&
+				!process.env.DISPLAY &&
+				!process.env.WAYLAND_DISPLAY);
+		if (headless) {
+			expect(pi.exec.mock.calls.some(([command]) => command === opener)).toBe(
+				false,
+			);
+		} else {
+			expect(pi.exec.mock.calls.some(([command]) => command === opener)).toBe(
+				true,
+			);
+		}
 	});
 
 	it("prompts for and persists an independently verified Workspace mapping", async () => {
@@ -801,7 +919,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			clientId: "client-1",
 			sessionId: "pi-session-1",
 			sessionLabel: expect.stringContaining("PAY-142"),
-			extensionVersion: "0.4.9",
+			extensionVersion: "0.4.10",
 			manifestSchemaVersion: 2,
 			baseRefOverrides: [],
 			idempotencyKey: expect.stringMatching(
@@ -1442,6 +1560,39 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		expect(mocks.stopTelemetry).toHaveBeenCalled();
 	});
 
+	it("times out a stuck reconciliation and records a safe Debug status", async () => {
+		vi.useFakeTimers();
+		mocks.panelSettings = { ...mocks.panelSettings, debug: true };
+		mocks.getAgenticDeliveryStatus.mockImplementationOnce(
+			() => new Promise(() => {}),
+		);
+		const { commands } = setup();
+		const notify = vi.fn();
+		const ctx = { ...commandContext(notify), mode: "tui" };
+
+		try {
+			const status = commands.get("tako-status")?.("", ctx);
+			await Promise.resolve();
+			expect(renderPanel(ctx).join("\n")).toContain("RECONCILE   running");
+			await vi.advanceTimersByTimeAsync(10_000);
+			await status;
+			expect(mocks.getAgenticDeliveryStatus).toHaveBeenCalledWith(
+				"pi-session-1",
+				"",
+				10_000,
+			);
+			const delayed = renderPanel(ctx).join("\n");
+			expect(delayed).toContain("RECONCILE   timeout");
+			expect(delayed).toContain("reconcile_timeout");
+			expect(notify).toHaveBeenCalledWith(
+				"Could not reconcile Agentic Delivery: request timed out; retry with /tako-status.",
+				"error",
+			);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("reconciles /tako-status without claiming a lifecycle mutation", async () => {
 		const { commands } = setup();
 		mocks.storedAgenticRun = {
@@ -1473,6 +1624,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		expect(mocks.getAgenticDeliveryStatus).toHaveBeenCalledWith(
 			"pi-session-1",
 			"run-1",
+			10_000,
 		);
 		expect(mocks.saveActiveAgenticRun).toHaveBeenCalledWith(
 			expect.objectContaining({
@@ -1626,6 +1778,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 
 	it("recovers the current Pi session and cleans telemetry/client on shutdown", async () => {
 		const { events } = setup();
+		mocks.panelSettings = { ...mocks.panelSettings, debug: true };
 		mocks.storedAgenticRun = {
 			version: 1,
 			orgId: "org-123",
@@ -1648,15 +1801,36 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			lastActivityAt: "2030-01-01T00:00:00.000Z",
 			updatedAt: "2030-01-01T00:00:00.000Z",
 		};
-		const ctx = commandContext();
+		const ctx = { ...commandContext(), mode: "tui" };
 		await events.get("session_start")?.({ reason: "startup" }, ctx);
 		expect(mocks.startAgentTelemetryReporter).toHaveBeenCalledOnce();
 		const reporterOptions = mocks.startAgentTelemetryReporter.mock.calls[0][0];
 		expect(reporterOptions.initialSequence).toBe(12);
+		const telemetrySnapshot = {
+			runId: "run-1",
+			sessionId: "pi-session-1",
+			sequence: 13,
+			observedAt: "2030-01-01T00:00:00.000Z",
+			instances: [],
+		};
+		await reporterOptions.report(telemetrySnapshot);
+		expect(mocks.reportAgentTelemetry).toHaveBeenCalledWith(
+			telemetrySnapshot,
+			10_000,
+		);
 		reporterOptions.onSequence(13);
 		expect(mocks.saveActiveAgenticRun).toHaveBeenCalledWith(
 			expect.objectContaining({ telemetrySequence: 13 }),
 		);
+		reporterOptions.onStart(13);
+		expect(renderPanel(ctx).join("\n")).toContain("TELEMETRY   running");
+		expect(renderPanel(ctx).join("\n")).toContain("seq 13");
+		reporterOptions.onSkip(13);
+		expect(renderPanel(ctx).join("\n")).toContain("skipped 1");
+		reporterOptions.onError(new Error("telemetry_timeout"), 13, 10_000);
+		const delayed = renderPanel(ctx).join("\n");
+		expect(delayed).toContain("TELEMETRY   timeout");
+		expect(delayed).toContain("telemetry_timeout");
 
 		await events.get("session_shutdown")?.({ reason: "quit" }, ctx);
 		expect(mocks.stopTelemetry).toHaveBeenCalledOnce();

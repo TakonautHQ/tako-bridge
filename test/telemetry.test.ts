@@ -102,6 +102,75 @@ describe("Agent telemetry reporter", () => {
 		stop();
 	});
 
+	it("records skipped heartbeat ticks while a report is still in flight", async () => {
+		const report = vi.fn(() => new Promise(() => {}));
+		const skipped = vi.fn();
+		const stop = startAgentTelemetryReporter({
+			intervalMs: 5_000,
+			reportTimeoutMs: 12_000,
+			onSkip: skipped,
+			report,
+			snapshot: () => ({
+				runId: "run-1",
+				sessionId: "session-1",
+				observedAt: new Date().toISOString(),
+				instances: [],
+			}),
+		} as Parameters<typeof startAgentTelemetryReporter>[0] & {
+			reportTimeoutMs: number;
+			onSkip: (sequence: number) => void;
+		});
+
+		await vi.advanceTimersByTimeAsync(5_000);
+		expect(report).toHaveBeenCalledOnce();
+		await vi.advanceTimersByTimeAsync(5_000);
+		expect(report).toHaveBeenCalledOnce();
+		expect(skipped).toHaveBeenCalledWith(1);
+		stop();
+	});
+
+	it("times out a stuck report, exposes lifecycle callbacks, and retries", async () => {
+		const report = vi
+			.fn()
+			.mockImplementationOnce(() => new Promise(() => {}))
+			.mockResolvedValueOnce({ accepted: true, sequence: 2 });
+		const starts = vi.fn();
+		const successes = vi.fn();
+		const errors = vi.fn();
+		const stop = startAgentTelemetryReporter({
+			intervalMs: 5_000,
+			reportTimeoutMs: 1_000,
+			onStart: starts,
+			onSuccess: successes,
+			onError: errors,
+			report,
+			snapshot: () => ({
+				runId: "run-1",
+				sessionId: "session-1",
+				observedAt: new Date().toISOString(),
+				instances: [],
+			}),
+		} as Parameters<typeof startAgentTelemetryReporter>[0] & {
+			reportTimeoutMs: number;
+			onStart: (sequence: number) => void;
+			onSuccess: (sequence: number, durationMs: number) => void;
+		});
+
+		await vi.advanceTimersByTimeAsync(5_000);
+		expect(starts).toHaveBeenLastCalledWith(1);
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(errors).toHaveBeenLastCalledWith(
+			expect.objectContaining({ message: "telemetry_timeout" }),
+			1,
+			1_000,
+		);
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(report).toHaveBeenCalledTimes(2);
+		expect(starts).toHaveBeenLastCalledWith(2);
+		expect(successes).toHaveBeenLastCalledWith(2, 0);
+		stop();
+	});
+
 	it("suppresses callbacks from an in-flight request after stop", async () => {
 		let rejectReport: ((error: Error) => void) | undefined;
 		const report = vi.fn(

@@ -8,7 +8,7 @@
 //   /tako-cancel-ack            acknowledge an observed cancellation request
 //   /tako-cleanup               clean retained terminal managed worktrees
 //   /tako-diagnostics W PATH    explicitly upload one redacted Diagnostic bundle
-//   /tako-tasks                 list all assigned work with startability
+//   /tako-tasks                 list current assigned work with Stage status
 //   /tako-start TASK-KEY        context → repository preflight → reserve/claim
 //   /tako-agentic-test W CMD    execute head-bound Workspace test evidence
 //   /tako-complete SNAPSHOT     propose exact completion evidence for review
@@ -28,6 +28,7 @@ import {
 	TakonautClient,
 	type BridgeTaskContext,
 	type GitHubRepositoryContext,
+	type StartableTask,
 } from "./client";
 import { collectLocalContext, formatLocalContextForInjection } from "./context";
 import { readAndPrepareDiagnostic } from "./diagnostics";
@@ -70,15 +71,20 @@ import {
 import {
 	createBridgePanelErrorWidget,
 	createBridgePanelWidget,
+	type BridgePanelData,
+	type BridgePanelDebugData,
+	type SyncOperationDebug,
 } from "./panel.js";
 import { normalizeBridgeApiBaseUrl } from "./server-url.js";
 import { parseStartArguments } from "./start";
+import { TaskPicker } from "./task-picker.js";
 import {
 	cleanupAgenticWorktree,
 	provisionAgenticWorktrees,
 	verifyAgenticRepositoryRoot,
 } from "./workspaces";
 import {
+	AGENT_TELEMETRY_TIMEOUT_MS,
 	isFeatureDisabledError,
 	startAgentTelemetryReporter,
 } from "./telemetry";
@@ -127,12 +133,49 @@ const TERMINAL_AGENTIC_STATUSES = new Set([
 	"cancelled",
 	"abandoned",
 ]);
+const PANEL_REFRESH_TIMEOUT_MS = 10_000;
+const RECONCILE_TIMEOUT_MS = 10_000;
+
+function idleSyncDebug(): SyncOperationDebug {
+	return {
+		state: "idle",
+		attempt: 0,
+		startedAt: null,
+		durationMs: null,
+		skipped: 0,
+		errorCode: null,
+	};
+}
+
+async function withSyncTimeout<T>(
+	promise: Promise<T>,
+	timeoutMs: number,
+	errorCode: string,
+): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => reject(new Error(errorCode)), timeoutMs);
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
 
 export default function takonautExtension(pi: ExtensionAPI): void {
 	let cfg: TakonautConfig | null = null;
 	let client: TakonautClient | null = null;
 	let stopTelemetry: (() => void) | null = null;
 	let panelTimer: ReturnType<typeof setInterval> | null = null;
+	let panelRefreshInFlight = false;
+	let cachedPanelTasks: StartableTask[] = [];
+	let cachedStandupStatus: "pending" | "submitted" | null = null;
+	let panelSync = idleSyncDebug();
+	let telemetrySync = idleSyncDebug();
+	let reconcileSync = idleSyncDebug();
 
 	const runner: CommandRunner = async (command, args, options) =>
 		execute(pi, command, args, options);
@@ -194,6 +237,71 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		panelTimer = null;
 	}
 
+	function panelDebugData(
+		settings: PanelSettings,
+	): BridgePanelDebugData | undefined {
+		if (!settings.debug) return undefined;
+		return {
+			panel: { ...panelSync },
+			telemetry: { ...telemetrySync },
+			reconcile: { ...reconcileSync },
+			nextRefreshSeconds:
+				settings.refreshSeconds === 0 ? null : settings.refreshSeconds,
+		};
+	}
+
+	function currentPanelData(
+		ctx: ExtensionContext,
+		c: TakonautConfig,
+		settings: PanelSettings,
+	): BridgePanelData {
+		return {
+			run: loadActiveAgenticRun(undefined, c.orgId, piSessionId(ctx)),
+			showRun: settings.showRun,
+			showStandup: settings.showStandup,
+			showTasks: settings.showTasks,
+			standupProjectKey: settings.standupProjectKey,
+			standupStatus: cachedStandupStatus,
+			tasks: cachedPanelTasks,
+			taskLimit: settings.taskLimit,
+			debug: panelDebugData(settings),
+		};
+	}
+
+	function renderCurrentPanel(
+		ctx: ExtensionContext,
+		c: TakonautConfig,
+		settings: PanelSettings,
+	): void {
+		ctx.ui.setWidget("tako-bridge-panel", (_tui, theme) =>
+			createBridgePanelWidget(currentPanelData(ctx, c, settings), theme),
+		);
+	}
+
+	function renderSyncDebugUpdate(
+		ctx: ExtensionContext,
+		c: TakonautConfig,
+	): void {
+		if (ctx.mode !== "tui" || !ctx.ui?.setWidget) return;
+		const settings = loadPanelSettings(c.configPath);
+		if (settings.visible && settings.debug) {
+			renderCurrentPanel(ctx, c, settings);
+		}
+	}
+
+	function renderPanelRefreshError(
+		ctx: ExtensionContext,
+		settings: PanelSettings,
+	): void {
+		const message =
+			panelSync.state === "timeout"
+				? "Refresh timed out; retrying on the next interval."
+				: "Refresh failed; retrying on the next interval.";
+		ctx.ui.setWidget("tako-bridge-panel", (_tui, theme) =>
+			createBridgePanelErrorWidget(message, theme, panelDebugData(settings)),
+		);
+	}
+
 	async function refreshPanel(
 		ctx: ExtensionContext,
 		c: TakonautConfig,
@@ -204,39 +312,59 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			ctx.ui.setWidget("tako-bridge-panel", undefined);
 			return;
 		}
+		const conn = ensure(ctx);
+		if (!conn) return;
+		if (panelRefreshInFlight) {
+			panelSync = { ...panelSync, skipped: panelSync.skipped + 1 };
+			renderCurrentPanel(ctx, c, settings);
+			return;
+		}
+
+		panelRefreshInFlight = true;
+		const startedAt = Date.now();
+		panelSync = {
+			state: "running",
+			attempt: panelSync.attempt + 1,
+			startedAt: new Date(startedAt).toISOString(),
+			durationMs: null,
+			skipped: panelSync.skipped,
+			errorCode: null,
+		};
+		renderCurrentPanel(ctx, c, settings);
 		try {
-			const conn = ensure(ctx);
-			if (!conn) return;
-			const [{ tasks }, standup] = await Promise.all([
-				conn.listStartableTasks(),
-				settings.showStandup && settings.standupProjectKey
-					? conn.getBridgeStandupStatus(settings.standupProjectKey).catch(() => null)
-					: Promise.resolve(null),
-			]);
-			const active = loadActiveAgenticRun(
-				undefined,
-				c.orgId,
-				piSessionId(ctx),
+			const [{ tasks }, standup] = await withSyncTimeout(
+				Promise.all([
+					conn.listStartableTasks("", PANEL_REFRESH_TIMEOUT_MS),
+					settings.showStandup && settings.standupProjectKey
+						? conn
+								.getBridgeStandupStatus(settings.standupProjectKey)
+								.catch(() => null)
+						: Promise.resolve(null),
+				]),
+				PANEL_REFRESH_TIMEOUT_MS,
+				"panel_refresh_timeout",
 			);
-			ctx.ui.setWidget("tako-bridge-panel", (_tui, theme) =>
-				createBridgePanelWidget(
-					{
-						run: active,
-						showRun: settings.showRun,
-						showStandup: settings.showStandup,
-						showTasks: settings.showTasks,
-						standupProjectKey: settings.standupProjectKey,
-						standupStatus: standup?.status ?? null,
-						tasks,
-						taskLimit: settings.taskLimit,
-					},
-					theme,
-				),
-			);
+			cachedPanelTasks = tasks;
+			cachedStandupStatus = standup?.status ?? null;
+			panelSync = {
+				...panelSync,
+				state: "ok",
+				durationMs: Date.now() - startedAt,
+				errorCode: null,
+			};
+			renderCurrentPanel(ctx, c, settings);
 		} catch (error) {
-			ctx.ui.setWidget("tako-bridge-panel", (_tui, theme) =>
-				createBridgePanelErrorWidget(errMsg(error), theme),
-			);
+			const timedOut =
+				error instanceof Error && error.message === "panel_refresh_timeout";
+			panelSync = {
+				...panelSync,
+				state: timedOut ? "timeout" : "error",
+				durationMs: Date.now() - startedAt,
+				errorCode: timedOut ? "panel_refresh_timeout" : "panel_refresh_failed",
+			};
+			renderPanelRefreshError(ctx, settings);
+		} finally {
+			panelRefreshInFlight = false;
 		}
 	}
 
@@ -304,6 +432,54 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		if (!conn) return;
 		stopTelemetry = startAgentTelemetryReporter({
 			initialSequence: state.telemetrySequence,
+			onStart: (sequence) => {
+				const current = loadActiveAgenticRun(
+					undefined,
+					c.orgId,
+					state.piSessionId,
+				);
+				if (!current || current.runId !== state.runId) return;
+				telemetrySync = {
+					state: "running",
+					attempt: telemetrySync.attempt + 1,
+					startedAt: new Date().toISOString(),
+					durationMs: null,
+					skipped: telemetrySync.skipped,
+					errorCode: null,
+					sequence,
+				};
+				renderSyncDebugUpdate(ctx, c);
+			},
+			onSkip: (sequence) => {
+				const current = loadActiveAgenticRun(
+					undefined,
+					c.orgId,
+					state.piSessionId,
+				);
+				if (!current || current.runId !== state.runId) return;
+				telemetrySync = {
+					...telemetrySync,
+					skipped: telemetrySync.skipped + 1,
+					sequence,
+				};
+				renderSyncDebugUpdate(ctx, c);
+			},
+			onSuccess: (sequence, durationMs) => {
+				const current = loadActiveAgenticRun(
+					undefined,
+					c.orgId,
+					state.piSessionId,
+				);
+				if (!current || current.runId !== state.runId) return;
+				telemetrySync = {
+					...telemetrySync,
+					state: "ok",
+					durationMs,
+					errorCode: null,
+					sequence,
+				};
+				renderSyncDebugUpdate(ctx, c);
+			},
 			onSequence: (sequence) => {
 				const current = loadActiveAgenticRun(
 					undefined,
@@ -351,7 +527,8 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					],
 				};
 			},
-			report: (snapshot) => conn.reportAgentTelemetry(snapshot),
+			report: (snapshot) =>
+				conn.reportAgentTelemetry(snapshot, AGENT_TELEMETRY_TIMEOUT_MS),
 			onFeatureDisabled: () => {
 				const current = loadActiveAgenticRun(
 					undefined,
@@ -359,6 +536,12 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					state.piSessionId,
 				);
 				if (!current || current.runId !== state.runId) return;
+				telemetrySync = {
+					...telemetrySync,
+					state: "error",
+					errorCode: "agent_profiles_disabled",
+				};
+				renderSyncDebugUpdate(ctx, c);
 				saveFeatureDisabled(current);
 				note(
 					ctx,
@@ -366,8 +549,31 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					"warning",
 				);
 			},
-			onError: (error) =>
-				note(ctx, `Agent telemetry delayed: ${errMsg(error)}`, "warning"),
+			onError: (error, sequence, durationMs) => {
+				const current = loadActiveAgenticRun(
+					undefined,
+					c.orgId,
+					state.piSessionId,
+				);
+				if (!current || current.runId !== state.runId) return;
+				const timedOut =
+					error instanceof Error && error.message === "telemetry_timeout";
+				telemetrySync = {
+					...telemetrySync,
+					state: timedOut ? "timeout" : "error",
+					durationMs,
+					errorCode: timedOut ? "telemetry_timeout" : "telemetry_report_failed",
+					sequence,
+				};
+				renderSyncDebugUpdate(ctx, c);
+				note(
+					ctx,
+					timedOut
+						? "Agent telemetry timed out; the next heartbeat will retry."
+						: "Agent telemetry was delayed; the next heartbeat will retry.",
+					"warning",
+				);
+			},
 		});
 	}
 
@@ -502,11 +708,33 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			if (!c || !conn) return;
 			const sessionId = piSessionId(ctx);
 			const active = loadActiveAgenticRun(undefined, c.orgId, sessionId);
+			const startedAt = Date.now();
+			reconcileSync = {
+				state: "running",
+				attempt: reconcileSync.attempt + 1,
+				startedAt: new Date(startedAt).toISOString(),
+				durationMs: null,
+				skipped: reconcileSync.skipped,
+				errorCode: null,
+			};
+			renderSyncDebugUpdate(ctx, c);
 			try {
-				const status = await conn.getAgenticDeliveryStatus(
-					sessionId,
-					active?.runId ?? "",
+				const status = await withSyncTimeout(
+					conn.getAgenticDeliveryStatus(
+						sessionId,
+						active?.runId ?? "",
+						RECONCILE_TIMEOUT_MS,
+					),
+					RECONCILE_TIMEOUT_MS,
+					"reconcile_timeout",
 				);
+				reconcileSync = {
+					...reconcileSync,
+					state: "ok",
+					durationMs: Date.now() - startedAt,
+					errorCode: null,
+				};
+				renderSyncDebugUpdate(ctx, c);
 				if (!active || status.status === "idle") {
 					if (active) {
 						stopAgentTelemetry();
@@ -562,10 +790,21 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 						`${status.next_command ?? `/tako-status ${active.taskKey}`}`,
 				);
 			} catch (error) {
+				const timedOut =
+					error instanceof Error && error.message === "reconcile_timeout";
+				reconcileSync = {
+					...reconcileSync,
+					state: timedOut ? "timeout" : "error",
+					durationMs: Date.now() - startedAt,
+					errorCode: timedOut ? "reconcile_timeout" : "reconcile_failed",
+				};
+				renderSyncDebugUpdate(ctx, c);
 				if (observeAgenticFeatureDisable(ctx, active, error)) return;
 				note(
 					ctx,
-					`Could not reconcile Agentic Delivery: ${errMsg(error)}`,
+					timedOut
+						? "Could not reconcile Agentic Delivery: request timed out; retry with /tako-status."
+						: "Could not reconcile Agentic Delivery: request failed; retry with /tako-status.",
 					"error",
 				);
 			}
@@ -639,6 +878,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					`Standup Project: ${settings.standupProjectKey ?? "not selected"}`,
 					`Task rows: ${settings.taskLimit}`,
 					`Refresh: ${settings.refreshSeconds === 0 ? "manual" : `${settings.refreshSeconds}s`}`,
+					`Debug: ${settings.debug ? "on" : "off"}`,
 					"Refresh now",
 					"Done",
 				]);
@@ -657,13 +897,20 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					const selected = await ctx.ui.select("Standup Project", projects);
 					if (selected) settings = { ...settings, standupProjectKey: selected };
 				} else if (choice.startsWith("Task rows:")) {
-					const selected = await ctx.ui.select("Task rows", ["1", "3", "5", "10"]);
+					const selected = await ctx.ui.select("Task rows", [
+						"1",
+						"3",
+						"5",
+						"10",
+					]);
 					if (selected) {
 						settings = {
 							...settings,
 							taskLimit: Number(selected) as PanelSettings["taskLimit"],
 						};
 					}
+				} else if (choice.startsWith("Debug:")) {
+					settings = { ...settings, debug: !settings.debug };
 				} else if (choice.startsWith("Refresh:")) {
 					const selected = await ctx.ui.select("Refresh interval", [
 						"Manual",
@@ -676,7 +923,9 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 							...settings,
 							refreshSeconds: (selected === "Manual"
 								? 0
-								: Number(selected.split(" ")[0])) as PanelSettings["refreshSeconds"],
+								: Number(
+										selected.split(" ")[0],
+									)) as PanelSettings["refreshSeconds"],
 						};
 					}
 				}
@@ -709,7 +958,11 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			);
 			if (!approved) return;
 			if (!ctx.model) {
-				return note(ctx, "Select a Pi model before drafting a Standup.", "error");
+				return note(
+					ctx,
+					"Select a Pi model before drafting a Standup.",
+					"error",
+				);
 			}
 			const conversation = buildStandupConversation(
 				ctx.sessionManager.getBranch() as unknown[],
@@ -756,7 +1009,11 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			try {
 				sections = parseStandupSections(generated);
 			} catch (error) {
-				return note(ctx, `Could not parse Standup draft: ${errMsg(error)}`, "error");
+				return note(
+					ctx,
+					`Could not parse Standup draft: ${errMsg(error)}`,
+					"error",
+				);
 			}
 			const edited = await ctx.ui.editor(
 				`Review ${projectKey} Standup draft`,
@@ -773,7 +1030,10 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				"The reviewed draft will be stored for 15 minutes and opened in your authenticated browser. It is not submitted automatically.",
 			);
 			if (!confirmed) return;
-			const draft = await conn.createBridgeStandupDraft({ projectKey, sections });
+			const draft = await conn.createBridgeStandupDraft({
+				projectKey,
+				sections,
+			});
 			const url = new URL(draft.draft_url, c.serverUrl).toString();
 			openUrl(url);
 			note(ctx, `Standup draft opened in Takonaut: ${url}`);
@@ -781,18 +1041,58 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("tako-tasks", {
-		description: "List all Takonaut work assigned to you with startability",
+		description: "Search current Takonaut work and open a selected item",
 		handler: async (_args, ctx) => {
+			const c = currentConfig(ctx);
 			const conn = ensure(ctx);
-			if (!conn) return;
+			if (!c || !conn) return;
 			try {
 				const { tasks } = await conn.listStartableTasks();
-				if (!tasks?.length) return note(ctx, "No work is assigned to you.");
-				const ready = tasks.filter((task) => task.startability.startable).length;
+				if (!tasks?.length)
+					return note(ctx, "No current work is assigned to you.");
+				if (ctx.mode === "tui") {
+					const selectedTaskKey = await ctx.ui.custom<string | null>(
+						(tui, theme, _keybindings, done) =>
+							new TaskPicker(tasks, theme, {
+								onSelect: done,
+								onCancel: () => done(null),
+								onChange: () => tui.requestRender(),
+							}),
+						{
+							overlay: true,
+							overlayOptions: {
+								anchor: "center",
+								width: "75%",
+								minWidth: 56,
+								maxHeight: "70%",
+								margin: 1,
+							},
+						},
+					);
+					if (!selectedTaskKey) return;
+					const selectedTask = tasks.find(
+						(task) => task.task_key === selectedTaskKey,
+					);
+					if (!selectedTask?.task_path) {
+						return note(
+							ctx,
+							`No direct link is available for ${selectedTaskKey}. Update the Takonaut application and retry.`,
+							"error",
+						);
+					}
+					const url = new URL(selectedTask.task_path, c.serverUrl).toString();
+					note(ctx, `Opening ${selectedTask.task_key}: ${url}`);
+					openUrl(url);
+					return;
+				}
+
+				const ready = tasks.filter(
+					(task) => task.startability.startable,
+				).length;
 				const blocked = tasks.length - ready;
 				note(
 					ctx,
-					`Assigned work: ${tasks.length} total · ${ready} ready · ${blocked} blocked\n` +
+					`Current work: ${tasks.length} total · ${ready} ready · ${blocked} blocked\n` +
 						tasks
 							.map((task) => {
 								const status = task.startability.startable
@@ -801,7 +1101,13 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 								const reason = task.startability.startable
 									? ""
 									: ` — ${formatStartabilityReasons(task.startability.reasons)}`;
-								return `  ${status}  ${task.task_key}  ${task.task_title}  (${task.project_key})${reason}`;
+								const scope =
+									task.workflow_mode === "kanban"
+										? `${task.project_key} · Kanban`
+										: task.sprint_name
+											? `${task.project_key} · ${task.sprint_name}`
+											: task.project_key;
+								return `  ${status}  ${task.task_key}  [${task.stage_name ?? "Unknown Stage"}]  ${task.task_title}  (${scope})${reason}`;
 							})
 							.join("\n"),
 				);
@@ -861,8 +1167,8 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					taskKey,
 					clientId,
 					sessionId,
-					sessionLabel: `${hostname()} — ${taskKey}`,
-					extensionVersion: "0.4.9",
+					sessionLabel: `${hostname()} - ${taskKey}`,
+					extensionVersion: "0.4.10",
 					manifestSchemaVersion: 2,
 					idempotencyKey: `start:${sessionId}:${startNonce}`,
 					baseRefOverrides,
@@ -907,7 +1213,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					organizationId: c.orgId,
 					projectId: started.project_id,
 					minimumRevision: projectSync?.acceptedRevision ?? 0,
-					extensionVersion: "0.4.9",
+					extensionVersion: "0.4.10",
 				});
 				const capabilityExpansion = capabilityExpansionRequired(
 					projectSync?.capabilityEnvelope ?? null,
@@ -2333,7 +2639,8 @@ const STARTABILITY_REASON_MESSAGES: Record<string, string> = {
 	not_assigned: "This work item is not assigned to you.",
 	archived: "This work item is archived.",
 	terminal_stage: "This work item is already in a terminal Stage.",
-	missing_bridge_run_permission: "You do not have Bridge access for this Project.",
+	missing_bridge_run_permission:
+		"You do not have Bridge access for this Project.",
 	project_agent_setup_required: "Project Agent Setup is not published.",
 	project_agent_playbook_required: "Default Playbook is not published.",
 	active_run_exists:
@@ -2361,14 +2668,21 @@ function buildStandupConversation(entries: unknown[]): string {
 		if (message.role !== "user" && message.role !== "assistant") continue;
 		const parts = Array.isArray(message.content) ? message.content : [];
 		const text = parts
-			.filter((part: any) => part?.type === "text" && typeof part.text === "string")
+			.filter(
+				(part: any) => part?.type === "text" && typeof part.text === "string",
+			)
 			.map((part: any) => part.text)
 			.join("\n")
 			.trim();
-		if (text) sections.push(`${message.role === "user" ? "User" : "Assistant"}: ${text}`);
+		if (text)
+			sections.push(
+				`${message.role === "user" ? "User" : "Assistant"}: ${text}`,
+			);
 		for (const part of parts) {
 			if (part?.type === "toolCall" && typeof part.name === "string") {
-				sections.push(`Tool: ${part.name} ${JSON.stringify(part.arguments ?? {})}`);
+				sections.push(
+					`Tool: ${part.name} ${JSON.stringify(part.arguments ?? {})}`,
+				);
 			}
 		}
 	}

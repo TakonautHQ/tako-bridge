@@ -21,7 +21,7 @@ Tako Bridge refuses to start work when repository identity, GitHub access, Git i
 Install a pinned Git tag so updates are deliberate:
 
 ```bash
-pi install git:github.com/TakonautHQ/tako-bridge@v0.4.9
+pi install git:github.com/TakonautHQ/tako-bridge@v0.4.10
 ```
 
 Start Pi, then run:
@@ -82,13 +82,13 @@ Human decisions remain in Takonaut's Review queue. Approval completes the govern
 | `/tako-login [api-base-url]` | Connect through device authorization. HTTPS is required except for explicit loopback development. |
 | `/tako-status` | Reconcile this Pi session with the durable Agentic Delivery run. |
 | `/tako-reconnect` | Explicitly authorize a replacement personal Pi key for retained state. |
-| `/tako-tasks` | List every assigned work item, including readiness and reasons blocked items cannot start. |
+| `/tako-tasks` | Search current assigned work by key, title, Project, Sprint, or Stage, then open the selected item in Takonaut. Sprint Projects show the active Sprint; Kanban Projects show pulled, unarchived board work. |
 | `/tako-panel` | Configure the persistent Tako Bridge panel above Pi's prompt editor. |
 | `/tako-standup` | Draft a Standup from the current Pi session and bounded Git activity, then open the reviewed draft in Takonaut. |
 
 ### Pi status panel and Standup draft
 
-In interactive Pi sessions, Tako Bridge shows a compact panel above the prompt editor with connection state, the active run, assigned/ready/blocked counts, task eligibility, and the selected Project's Standup status. The panel refreshes every 30 seconds by default. Use `/tako-panel` to show or hide sections, choose the number of task rows, change the refresh interval, and select the Project whose Standup status is tracked. Preferences are stored in the non-secret `~/.takonaut/bridge.json` file.
+In interactive Pi sessions, Tako Bridge shows a compact panel above the prompt editor with connection state, the active run, ready/blocked totals, configured Stage-name counts, current task rows, and the selected Project's Standup status. Use `/tako-panel` to show or hide sections, set the task-row limit to 1, 3, 5, or 10, change the refresh interval, select the Standup Project, or enable the optional Debug block. Debug shows safe panel-refresh, telemetry, and reconciliation timing/status details without credentials or payload contents. Preferences are stored in the non-secret `~/.takonaut/bridge.json` file.
 
 `/tako-standup` asks before sending the current Pi conversation and bounded Git log/status summaries to the developer's configured Pi model. The generated sections open in an editor for review. Only after a second confirmation does Bridge upload the reviewed draft to Takonaut for 15 minutes and open the authenticated Standup form in the system browser. It never submits the Standup automatically.
 

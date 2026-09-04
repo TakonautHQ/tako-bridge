@@ -25,18 +25,21 @@ const panelData: BridgePanelData = {
 			task_key: "PAY-155",
 			task_title: "Audit token expiry",
 			project_key: "PAY",
+			stage_name: "Development",
 			startability: { startable: true, reasons: [] },
 		},
 		{
 			task_key: "PAY-162",
 			task_title: "Retry failed events",
 			project_key: "PAY",
+			stage_name: "Development",
 			startability: { startable: true, reasons: [] },
 		},
 		{
 			task_key: "PAY-143",
 			task_title: "Rotate credentials",
 			project_key: "PAY",
+			stage_name: "Review",
 			startability: {
 				startable: false,
 				reasons: ["project_agent_playbook_required"],
@@ -67,6 +70,9 @@ describe("Tako Bridge responsive panel", () => {
 		expectFullWidth(lines, width);
 		expect(text[0]).toMatch(/^╭─ TAKO BRIDGE .*● LIVE ─╮$/);
 		expect(text[1]).toMatch(/│ RUN\s+│ WORK\s+│ STANDUP\s+│/);
+		expect(text.some((line) => line.includes("Development 2 · Review 1"))).toBe(
+			true,
+		);
 		expect(
 			text.some(
 				(line) => line.includes("NEXT") && line.includes("/tako-status"),
@@ -131,6 +137,74 @@ describe("Tako Bridge responsive panel", () => {
 
 		expectFullWidth(lines, width);
 		expect(plain(lines).join("\n")).toContain("PAY-200");
+	});
+
+	it("shows detailed safe synchronization diagnostics when Debug mode is enabled", () => {
+		const width = 120;
+		const lines = render(width, {
+			...panelData,
+			debug: {
+				panel: {
+					state: "running",
+					attempt: 3,
+					startedAt: "2026-09-04T18:50:00.000Z",
+					durationMs: null,
+					skipped: 1,
+					errorCode: null,
+				},
+				telemetry: {
+					state: "timeout",
+					attempt: 8,
+					startedAt: "2026-09-04T18:49:45.000Z",
+					durationMs: 10_000,
+					skipped: 0,
+					errorCode: "telemetry_timeout",
+					sequence: 7,
+				},
+				reconcile: {
+					state: "ok",
+					attempt: 2,
+					startedAt: "2026-09-04T18:48:00.000Z",
+					durationMs: 84,
+					skipped: 0,
+					errorCode: null,
+				},
+				nextRefreshSeconds: 12,
+			},
+		} as BridgePanelData);
+		const text = plain(lines);
+
+		expectFullWidth(lines, width);
+		expect(text.some((line) => line.includes("DEBUG SYNC"))).toBe(true);
+		expect(
+			text.some(
+				(line) =>
+					line.includes("PANEL") &&
+					line.includes("running") &&
+					line.includes("attempt 3") &&
+					line.includes("skipped 1"),
+			),
+		).toBe(true);
+		expect(
+			text.some(
+				(line) =>
+					line.includes("TELEMETRY") &&
+					line.includes("timeout") &&
+					line.includes("seq 7"),
+			),
+		).toBe(true);
+		expect(
+			text.some(
+				(line) =>
+					line.includes("RECONCILE") &&
+					line.includes("ok") &&
+					line.includes("84ms"),
+			),
+		).toBe(true);
+		expect(text.some((line) => line.includes("NEXT REFRESH  12s"))).toBe(true);
+		expect(
+			text.some((line) => line.includes("LAST ERROR  telemetry_timeout")),
+		).toBe(true);
 	});
 
 	it("renders delayed state as a complete full-width frame", () => {

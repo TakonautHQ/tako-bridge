@@ -119,28 +119,29 @@ describe("secure Bridge profiles", () => {
 			showRun: true,
 			showTasks: true,
 			showStandup: true,
+			debug: false,
 			taskLimit: 3,
 			refreshSeconds: 30,
 		});
 
-		bridgeConfig.savePanelSettings(
-			{
-				visible: false,
-				showRun: false,
-				showTasks: true,
-				showStandup: true,
-				taskLimit: 5,
-				refreshSeconds: 60,
-				standupProjectKey: "PAY",
-			},
-			path,
-		);
+		const panelSettings = {
+			visible: false,
+			showRun: false,
+			showTasks: true,
+			showStandup: true,
+			debug: true,
+			taskLimit: 5 as const,
+			refreshSeconds: 60 as const,
+			standupProjectKey: "PAY",
+		};
+		bridgeConfig.savePanelSettings(panelSettings, path);
 
 		expect(bridgeConfig.loadPanelSettings(path)).toEqual({
 			visible: false,
 			showRun: false,
 			showTasks: true,
 			showStandup: true,
+			debug: true,
 			taskLimit: 5,
 			refreshSeconds: 60,
 			standupProjectKey: "PAY",
@@ -152,6 +153,7 @@ describe("secure Bridge profiles", () => {
 				showRun: false,
 				showTasks: true,
 				showStandup: true,
+				debug: true,
 				taskLimit: 5,
 				refreshSeconds: 60,
 				standupProjectKey: "PAY",
