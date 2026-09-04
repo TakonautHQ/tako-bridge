@@ -1,6 +1,6 @@
 {
   "name": "@takonaut/tako-bridge",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Tako Bridge for Pi — governed Takonaut work, repository verification, durable recovery, and human-reviewed delivery evidence.",
   "license": "Apache-2.0",
   "type": "module",
@@ -17,6 +17,7 @@
     "src",
     "bun.lock",
     "npm-shrinkwrap.json",
+    ".npmrc",
     "README.md",
     "LICENSE",
     "SECURITY.md"

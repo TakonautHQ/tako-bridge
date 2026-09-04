@@ -178,6 +178,9 @@ describe("Pi package manifest", () => {
 		tempHomes.push(home);
 		const extractedPackage = packAndInstallDependencies(home);
 		expect(existsSync(join(extractedPackage, "src", "index.ts"))).toBe(true);
+		expect(readFileSync(join(extractedPackage, ".npmrc"), "utf-8")).toBe(
+			"audit=false\nfund=false\n",
+		);
 		expect(existsSync(join(extractedPackage, "src", "runner.ts"))).toBe(false);
 		expect(existsSync(join(extractedPackage, "src", "runner-cli.ts"))).toBe(
 			false,
@@ -191,11 +194,11 @@ describe("Pi package manifest", () => {
 			const home = mkdtempSync(join(tmpdir(), "tako-bridge-npm-install-"));
 			tempHomes.push(home);
 			const extractedPackage = packPackage(home);
-			execFileSync(
-				"npm",
-				["install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
-				{ cwd: extractedPackage, stdio: "pipe" },
-			);
+			execFileSync("npm", ["install", "--omit=dev"], {
+				cwd: extractedPackage,
+				stdio: "pipe",
+				timeout: 30_000,
+			});
 			expect(existsSync(join(extractedPackage, "node_modules"))).toBe(true);
 		},
 		90_000,
