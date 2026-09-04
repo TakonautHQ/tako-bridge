@@ -1,8 +1,8 @@
 // Secure, organization-profiled Takonaut connection and repository configuration.
 //
 // Non-secret repository settings live in bridge.json. Bearer credentials live in
-// an owner-only credentials.json beside it. Legacy flat files are migrated only
-// when their existing ownership/mode is already safe.
+// an owner-only credentials.json beside it. Existing owned, regular bridge.json
+// files are tightened to mode 0600 before access or legacy credential migration.
 
 import {
 	chmodSync,
@@ -127,14 +127,14 @@ function normalizedPanelSettings(
 export function loadPanelSettings(
 	path: string = BRIDGE_CONFIG_PATH,
 ): PanelSettings {
-	return normalizedPanelSettings(readJson<BridgeFile>(path, "Bridge config")?.panel);
+	return normalizedPanelSettings(readBridgeJson(path)?.panel);
 }
 
 export function savePanelSettings(
 	settings: PanelSettings,
 	path: string = BRIDGE_CONFIG_PATH,
 ): void {
-	const current = readJson<BridgeFile>(path, "Bridge config") ?? {};
+	const current = readBridgeJson(path) ?? {};
 	writeJson(
 		path,
 		sanitizedBridge({
@@ -194,6 +194,19 @@ function readJson<T>(path: string, label: string, secret = false): T | null {
 			`Malformed ${label} at ${path}; fix or move the file before retrying.`,
 		);
 	}
+}
+
+function readBridgeJson(path: string): BridgeFile | null {
+	if (!existsSync(path)) return null;
+	assertSecureDirectory(dirname(path));
+	const info = lstatSync(path);
+	if (info.isSymbolicLink() || !info.isFile()) {
+		throw new Error(`Bridge config path must be a regular file: ${path}`);
+	}
+	assertOwned(path, "Bridge config file");
+	if ((info.mode & 0o077) !== 0) chmodSync(path, 0o600);
+	assertSecureFile(path);
+	return readJson<BridgeFile>(path, "Bridge config");
 }
 
 function writeJson(path: string, value: unknown, secret: boolean): void {
@@ -295,9 +308,7 @@ function readFiles(
 	configPath: string,
 	credentialPath: string,
 ): { bridge: BridgeFile; credentials: CredentialFile | null } {
-	const rawBridge = readJson<BridgeFile>(configPath, "Bridge config") ?? {
-		version: 2,
-	};
+	const rawBridge = readBridgeJson(configPath) ?? { version: 2 };
 	return migrateV1(configPath, credentialPath, rawBridge);
 }
 
@@ -356,7 +367,7 @@ export function readProjectRepoMapping(
 	projectId: string,
 	path: string = BRIDGE_CONFIG_PATH,
 ): ProjectRepoMapping | null {
-	const bridge = readJson<BridgeFile>(path, "Bridge config") ?? {};
+	const bridge = readBridgeJson(path) ?? {};
 	return bridge.projectRepos?.[projectRepoMappingKey(orgId, projectId)] ?? null;
 }
 

@@ -59,6 +59,18 @@ describe("secure Bridge profiles", () => {
 		expect(statSync(credentialsPath).mode & 0o777).toBe(0o600);
 	});
 
+	it("repairs an existing owner-readable Bridge config before panel access", () => {
+		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+		writeFileSync(
+			path,
+			JSON.stringify({ version: 2, panel: { visible: false } }),
+			{ mode: 0o644 },
+		);
+
+		expect(bridgeConfig.loadPanelSettings(path).visible).toBe(false);
+		expect(statSync(path).mode & 0o777).toBe(0o600);
+	});
+
 	it("refuses to persist a personal key for an insecure server", () => {
 		expect(() =>
 			saveConfig({ ...CREDS, serverUrl: "http://takonaut.test/mcp/" }, path),
@@ -283,6 +295,24 @@ describe("secure Bridge profiles", () => {
 		expect(() =>
 			readFileSync(join(dirname(projectConfig), "credentials.json"), "utf-8"),
 		).toThrow();
+	});
+
+	it("repairs permissions before migrating a v1 flat credential file", () => {
+		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+		writeFileSync(
+			path,
+			JSON.stringify({
+				serverUrl: CREDS.serverUrl,
+				apiKey: CREDS.apiKey,
+				orgId: CREDS.orgId,
+			}),
+			{ mode: 0o644 },
+		);
+
+		const loaded = loadConfigFromFiles(path, credentialsPath);
+		expect(loaded?.apiKey).toBe("key-new");
+		expect(statSync(path).mode & 0o777).toBe(0o600);
+		expect(statSync(credentialsPath).mode & 0o777).toBe(0o600);
 	});
 
 	it("migrates a secure v1 flat file without losing settings or credentials", () => {

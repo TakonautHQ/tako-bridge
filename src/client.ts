@@ -248,7 +248,7 @@ export class TakonautClient {
 
 	constructor(private cfg: TakonautConfig) {
 		this.client = new Client(
-			{ name: "tako-bridge", version: "0.4.6" },
+			{ name: "tako-bridge", version: "0.4.7" },
 			{ capabilities: {} },
 		);
 	}
