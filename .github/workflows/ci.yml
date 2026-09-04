@@ -26,4 +26,17 @@ jobs:
       - run: bun run test
       - run: bun run typecheck
       - run: bun run pack:check
-      - run: bun audit
+      - name: Audit dependencies
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if bun audit; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "bun audit request failed; retrying in 10 seconds" \
+                "(attempt $attempt/3)"
+              sleep 10
+            fi
+          done
+          exit 1
