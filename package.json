@@ -1,6 +1,6 @@
 {
   "name": "@takonaut/tako-bridge",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "description": "Tako Bridge for Pi — governed Takonaut work, repository verification, durable recovery, and human-reviewed delivery evidence.",
   "license": "Apache-2.0",
   "type": "module",
@@ -43,10 +43,12 @@
     "@modelcontextprotocol/sdk": "^1.30.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.84.0",
+    "@earendil-works/pi-tui": "0.84.1",
     "@types/node": "^20.19.43",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10"

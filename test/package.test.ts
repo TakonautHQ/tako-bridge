@@ -150,9 +150,11 @@ describe("Pi package manifest", () => {
 		expect(pkg.pi?.extensions).toEqual(["./src/index.ts"]);
 		expect(pkg.bin).toBeUndefined();
 		expect(pkg.peerDependencies?.["@earendil-works/pi-coding-agent"]).toBe("*");
+		expect(pkg.peerDependencies?.["@earendil-works/pi-tui"]).toBe("*");
 		expect(pkg.devDependencies?.["@earendil-works/pi-coding-agent"]).toBe(
 			"0.84.0",
 		);
+		expect(pkg.devDependencies?.["@earendil-works/pi-tui"]).toBe("0.84.1");
 		for (const name of [
 			"@earendil-works/pi-agent-core",
 			"@earendil-works/pi-ai",

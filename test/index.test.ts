@@ -1,3 +1,4 @@
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const taskContext = {
@@ -559,9 +560,15 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 
 		await events.get("session_start")?.({}, ctx);
 
-		expect(renderPanel(ctx)).toContain(
-			"│ Run  Idle  ·  Standup  PAY · Pending",
-		);
+		const lines = renderPanel(ctx);
+		expect(
+			lines.some(
+				(line) =>
+					line.includes("STANDUP") &&
+					line.includes("PAY") &&
+					line.includes("Pending"),
+			),
+		).toBe(true);
 		await events.get("session_shutdown")?.({}, ctx);
 	});
 
@@ -693,16 +700,19 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 
 		await events.get("session_start")?.({}, ctx);
 
-		expect(renderPanel(ctx)).toEqual([
-			"╭─ TAKO BRIDGE  ● Connected",
-			"│ Run  Idle  ·  Standup  Not set",
-			"│ Work  1 ready  ·  1 blocked",
-			"│ ◆ PAY-142  Handle expired sessions",
-			"│ ◇ PAY-143  Rotate credentials",
-			"╰─ /tako-tasks details  ·  /tako-panel settings",
-		]);
+		const lines = renderPanel(ctx);
+		expect(lines.every((line) => visibleWidth(line) === 80)).toBe(true);
+		expect(lines.some((line) => line.includes("RUN"))).toBe(true);
+		expect(lines.some((line) => line.includes("WORK"))).toBe(true);
+		expect(lines.some((line) => line.includes("STANDUP"))).toBe(true);
+		expect(lines).toEqual(
+			expect.arrayContaining([
+				expect.stringContaining("◆ PAY-142  Handle expired sessions"),
+				expect.stringContaining("◇ PAY-143  Rotate credentials"),
+			]),
+		);
 		const narrow = renderPanel(ctx, 38);
-		expect(narrow.every((line) => line.length <= 38)).toBe(true);
+		expect(narrow.every((line) => visibleWidth(line) === 38)).toBe(true);
 		expect(narrow.join("\n")).not.toContain("Default Playbook");
 		await events.get("session_shutdown")?.({}, ctx);
 	});
@@ -791,7 +801,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			clientId: "client-1",
 			sessionId: "pi-session-1",
 			sessionLabel: expect.stringContaining("PAY-142"),
-			extensionVersion: "0.4.8",
+			extensionVersion: "0.4.9",
 			manifestSchemaVersion: 2,
 			baseRefOverrides: [],
 			idempotencyKey: expect.stringMatching(

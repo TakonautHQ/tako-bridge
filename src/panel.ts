@@ -1,4 +1,8 @@
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { StartableTask } from "./client.js";
+
+const WIDE_PANEL_MIN_WIDTH = 100;
+const MEDIUM_PANEL_MIN_WIDTH = 72;
 
 const PANEL_TONES = [
 	"accent",
@@ -19,7 +23,9 @@ interface PanelTheme {
 
 interface PanelRun {
 	taskKey: string;
+	projectKey?: string;
 	executorPhase: string;
+	status?: string;
 }
 
 export interface BridgePanelData {
@@ -39,27 +45,293 @@ interface PanelSegment {
 	strong?: boolean;
 }
 
-function paintLine(
+interface PanelSection {
+	label: string;
+	weight: number;
+	primary: PanelSegment[];
+	secondary: PanelSegment[];
+}
+
+function panelWidth(width: number): number {
+	return Math.max(1, Math.floor(width));
+}
+
+function renderSegments(theme: PanelTheme, segments: PanelSegment[]): string {
+	return segments
+		.map((segment) => {
+			const content = segment.strong ? theme.bold(segment.text) : segment.text;
+			return theme.fg(segment.tone, content);
+		})
+		.join("");
+}
+
+function fit(text: string, width: number, ellipsis = "…"): string {
+	if (width <= 0) return "";
+	return truncateToWidth(text, width, ellipsis, true);
+}
+
+function border(theme: PanelTheme, text: string): string {
+	return theme.fg("borderMuted", text);
+}
+
+function framedLine(
 	theme: PanelTheme,
 	width: number,
 	segments: PanelSegment[],
 ): string {
-	let remaining = Math.max(1, width);
-	const rendered: string[] = [];
-	for (const segment of segments) {
-		if (remaining <= 0) break;
-		const clipped =
-			segment.text.length <= remaining
-				? segment.text
-				: remaining === 1
-					? "…"
-					: `${segment.text.slice(0, remaining - 1)}…`;
-		const content = segment.strong ? theme.bold(clipped) : clipped;
-		rendered.push(theme.fg(segment.tone, content));
-		remaining -= clipped.length;
-		if (clipped.length < segment.text.length) break;
+	const resolvedWidth = panelWidth(width);
+	if (resolvedWidth === 1) return border(theme, "│");
+	const content = fit(renderSegments(theme, segments), resolvedWidth - 2);
+	return `${border(theme, "│")}${content}${border(theme, "│")}`;
+}
+
+function framedSplitLine(
+	theme: PanelTheme,
+	width: number,
+	left: PanelSegment[],
+	right: PanelSegment[],
+): string {
+	const resolvedWidth = panelWidth(width);
+	if (resolvedWidth === 1) return border(theme, "│");
+	const innerWidth = resolvedWidth - 2;
+	const leftText = renderSegments(theme, left);
+	const rightText = renderSegments(theme, right);
+	const gap = innerWidth - visibleWidth(leftText) - visibleWidth(rightText);
+	const content =
+		gap >= 1
+			? `${leftText}${" ".repeat(gap)}${rightText}`
+			: fit(`${leftText} ${rightText}`, innerWidth);
+	return `${border(theme, "│")}${fit(content, innerWidth)}${border(theme, "│")}`;
+}
+
+function framedRule(
+	theme: PanelTheme,
+	width: number,
+	leftGlyph: string,
+	rightGlyph: string,
+	left: PanelSegment[],
+	right: PanelSegment[] = [],
+): string {
+	const resolvedWidth = panelWidth(width);
+	if (resolvedWidth === 1) return border(theme, leftGlyph);
+	const innerWidth = resolvedWidth - 2;
+	const leftText = renderSegments(theme, left);
+	const rightText = renderSegments(theme, right);
+	const fillWidth =
+		innerWidth - visibleWidth(leftText) - visibleWidth(rightText);
+	const content =
+		fillWidth >= 0
+			? `${leftText}${border(theme, "─".repeat(fillWidth))}${rightText}`
+			: fit(`${leftText}${rightText}`, innerWidth);
+	return `${border(theme, leftGlyph)}${fit(content, innerWidth, "")}${border(theme, rightGlyph)}`;
+}
+
+function separator(
+	theme: PanelTheme,
+	width: number,
+	columnWidths?: number[],
+	junction = "┴",
+): string {
+	const resolvedWidth = panelWidth(width);
+	if (resolvedWidth === 1) return border(theme, "├");
+	if (!columnWidths?.length) {
+		return border(theme, `├${"─".repeat(resolvedWidth - 2)}┤`);
 	}
-	return rendered.join("");
+	return border(
+		theme,
+		`├${columnWidths.map((cellWidth) => "─".repeat(cellWidth)).join(junction)}┤`,
+	);
+}
+
+function allocateColumnWidths(
+	innerWidth: number,
+	sections: PanelSection[],
+): number[] {
+	const available = Math.max(0, innerWidth - (sections.length - 1));
+	const totalWeight = sections.reduce(
+		(sum, section) => sum + section.weight,
+		0,
+	);
+	const widths = sections.map((section) =>
+		Math.max(1, Math.floor((available * section.weight) / totalWeight)),
+	);
+	let difference = available - widths.reduce((sum, width) => sum + width, 0);
+	for (let index = 0; difference !== 0; index = (index + 1) % widths.length) {
+		if (difference > 0) {
+			widths[index]++;
+			difference--;
+		} else if (widths[index] > 1) {
+			widths[index]--;
+			difference++;
+		}
+	}
+	return widths;
+}
+
+function renderCell(
+	theme: PanelTheme,
+	width: number,
+	segments: PanelSegment[],
+): string {
+	if (width <= 0) return "";
+	if (width === 1) return " ";
+	return fit(` ${renderSegments(theme, segments)}`, width);
+}
+
+function renderColumns(
+	theme: PanelTheme,
+	width: number,
+	sections: PanelSection[],
+): { lines: string[]; widths: number[] } {
+	const resolvedWidth = panelWidth(width);
+	const innerWidth = Math.max(1, resolvedWidth - 2);
+	const widths = allocateColumnWidths(innerWidth, sections);
+	const row = (content: (section: PanelSection) => PanelSegment[]) =>
+		`${border(theme, "│")}${sections
+			.map((section, index) =>
+				renderCell(theme, widths[index], content(section)),
+			)
+			.join(border(theme, "│"))}${border(theme, "│")}`;
+	return {
+		widths,
+		lines: [
+			row((section) => [{ text: section.label, tone: "dim", strong: true }]),
+			row((section) => section.primary),
+			row((section) => section.secondary),
+		],
+	};
+}
+
+function humanize(value: string): string {
+	return value.replaceAll("_", " ");
+}
+
+function buildSections(
+	data: BridgePanelData,
+	ready: number,
+	blocked: number,
+): PanelSection[] {
+	const sections: PanelSection[] = [];
+	if (data.showRun) {
+		const runDetail = data.run
+			? [data.run.projectKey, humanize(data.run.executorPhase), data.run.status]
+					.filter(
+						(value, index, values) => value && values.indexOf(value) === index,
+					)
+					.join(" · ")
+			: "No active delivery";
+		sections.push({
+			label: "RUN",
+			weight: 45,
+			primary: [
+				{
+					text: data.run?.taskKey ?? "Idle",
+					tone: data.run ? "accent" : "muted",
+					strong: Boolean(data.run),
+				},
+			],
+			secondary: [{ text: runDetail, tone: data.run ? "text" : "muted" }],
+		});
+	}
+	if (data.showTasks) {
+		const nextTask =
+			data.tasks.find((task) => task.startability.startable) ?? data.tasks[0];
+		sections.push({
+			label: "WORK",
+			weight: 35,
+			primary: [
+				{ text: `${ready} ready`, tone: ready ? "success" : "muted" },
+				{ text: " · ", tone: "dim" },
+				{ text: `${blocked} blocked`, tone: blocked ? "warning" : "muted" },
+			],
+			secondary: [
+				{
+					text: nextTask
+						? `${nextTask.startability.startable ? "Next" : "Review"} ${nextTask.task_key}`
+						: "No assigned work",
+					tone: nextTask?.startability.startable ? "accent" : "muted",
+				},
+			],
+		});
+	}
+	if (data.showStandup) {
+		let standupState = "Use /tako-panel";
+		if (data.standupProjectKey) {
+			if (data.standupStatus === "submitted") {
+				standupState = "Submitted";
+			} else if (data.standupStatus === "pending") {
+				standupState = "Pending";
+			} else {
+				standupState = "Unavailable";
+			}
+		}
+		sections.push({
+			label: "STANDUP",
+			weight: 20,
+			primary: [
+				{
+					text: data.standupProjectKey ?? "Not set",
+					tone: data.standupProjectKey ? "accent" : "muted",
+					strong: Boolean(data.standupProjectKey),
+				},
+			],
+			secondary: [
+				{
+					text: standupState,
+					tone: data.standupStatus === "submitted" ? "success" : "muted",
+				},
+			],
+		});
+	}
+	return sections;
+}
+
+function stackedSection(
+	theme: PanelTheme,
+	width: number,
+	section: PanelSection,
+) {
+	return framedLine(theme, width, [
+		{ text: ` ${section.label}  `, tone: "dim", strong: true },
+		...section.primary,
+		{ text: " · ", tone: "dim" },
+		...section.secondary,
+	]);
+}
+
+function nextAction(data: BridgePanelData): {
+	message: PanelSegment[];
+	command: PanelSegment[];
+} {
+	if (data.run) {
+		return {
+			message: [{ text: ` Inspect ${data.run.taskKey}`, tone: "text" }],
+			command: [{ text: "/tako-status ", tone: "accent", strong: true }],
+		};
+	}
+	const readyTask = data.tasks.find((task) => task.startability.startable);
+	if (data.showTasks && readyTask) {
+		return {
+			message: [{ text: ` Start ${readyTask.task_key}`, tone: "text" }],
+			command: [
+				{
+					text: `/tako-start ${readyTask.task_key} `,
+					tone: "accent",
+					strong: true,
+				},
+			],
+		};
+	}
+	if (data.showStandup && data.standupStatus === "pending") {
+		return {
+			message: [{ text: " Prepare Standup", tone: "text" }],
+			command: [{ text: "/tako-standup ", tone: "accent", strong: true }],
+		};
+	}
+	return {
+		message: [{ text: " Review Bridge status", tone: "text" }],
+		command: [{ text: "/tako-panel ", tone: "accent", strong: true }],
+	};
 }
 
 export function createBridgePanelWidget(
@@ -68,66 +340,67 @@ export function createBridgePanelWidget(
 ) {
 	return {
 		render(width: number): string[] {
-			const paint = (segments: PanelSegment[]) =>
-				paintLine(theme, width, segments);
+			const resolvedWidth = panelWidth(width);
 			const ready = data.tasks.filter(
 				(task) => task.startability.startable,
 			).length;
 			const blocked = data.tasks.length - ready;
+			const sections = buildSections(data, ready, blocked);
 			const lines = [
-				paint([
-					{ text: "╭─ ", tone: "borderMuted" },
-					{ text: "TAKO BRIDGE", tone: "accent", strong: true },
-					{ text: "  ", tone: "dim" },
-					{ text: "● Connected", tone: "success" },
-				]),
+				framedRule(
+					theme,
+					resolvedWidth,
+					"╭",
+					"╮",
+					[
+						{ text: "─ ", tone: "borderMuted" },
+						{ text: "TAKO BRIDGE", tone: "accent", strong: true },
+						{ text: " ", tone: "borderMuted" },
+					],
+					[
+						{ text: "● LIVE", tone: "success", strong: true },
+						{ text: " ─", tone: "borderMuted" },
+					],
+				),
 			];
 
-			const info: PanelSegment[] = [{ text: "│ ", tone: "borderMuted" }];
-			if (data.showRun) {
-				const runState = data.run
-					? `${data.run.taskKey} · ${data.run.executorPhase.replaceAll("_", " ")}`
-					: "Idle";
-				info.push(
-					{ text: "Run  ", tone: "dim" },
-					{ text: runState, tone: data.run ? "accent" : "muted" },
-				);
+			if (resolvedWidth >= WIDE_PANEL_MIN_WIDTH && sections.length >= 2) {
+				const grid = renderColumns(theme, resolvedWidth, sections);
+				lines.push(...grid.lines, separator(theme, resolvedWidth, grid.widths));
+			} else if (
+				resolvedWidth >= MEDIUM_PANEL_MIN_WIDTH &&
+				sections.length >= 2
+			) {
+				const gridSections = sections.slice(0, 2);
+				const grid = renderColumns(theme, resolvedWidth, gridSections);
+				lines.push(...grid.lines, separator(theme, resolvedWidth, grid.widths));
+				for (const section of sections.slice(2)) {
+					lines.push(stackedSection(theme, resolvedWidth, section));
+				}
+				if (sections.length > 2) lines.push(separator(theme, resolvedWidth));
+			} else {
+				for (const section of sections) {
+					lines.push(stackedSection(theme, resolvedWidth, section));
+				}
+				if (sections.length > 0) lines.push(separator(theme, resolvedWidth));
 			}
-			if (data.showStandup) {
-				if (data.showRun) info.push({ text: "  ·  ", tone: "dim" });
-				const standupState = !data.standupProjectKey
-					? "Not set"
-					: !data.standupStatus
-						? `${data.standupProjectKey} · Unavailable`
-						: `${data.standupProjectKey} · ${data.standupStatus === "submitted" ? "Submitted" : "Pending"}`;
-				info.push(
-					{ text: "Standup  ", tone: "dim" },
-					{
-						text: standupState,
-						tone: data.standupStatus === "submitted" ? "success" : "muted",
-					},
-				);
-			}
-			if (info.length > 1) lines.push(paint(info));
+
+			const action = nextAction(data);
+			lines.push(
+				framedSplitLine(
+					theme,
+					resolvedWidth,
+					[{ text: " NEXT", tone: "dim", strong: true }, ...action.message],
+					action.command,
+				),
+			);
 
 			if (data.showTasks) {
-				lines.push(
-					paint([
-						{ text: "│ ", tone: "borderMuted" },
-						{ text: "Work  ", tone: "dim" },
-						{ text: `${ready} ready`, tone: "success" },
-						{ text: "  ·  ", tone: "dim" },
-						{
-							text: `${blocked} blocked`,
-							tone: blocked ? "warning" : "muted",
-						},
-					]),
-				);
 				for (const task of data.tasks.slice(0, data.taskLimit)) {
 					const startable = task.startability.startable;
 					lines.push(
-						paint([
-							{ text: "│ ", tone: "borderMuted" },
+						framedLine(theme, resolvedWidth, [
+							{ text: " ", tone: "borderMuted" },
 							{
 								text: startable ? "◆ " : "◇ ",
 								tone: startable ? "success" : "warning",
@@ -140,23 +413,24 @@ export function createBridgePanelWidget(
 			}
 
 			const hiddenTasks = Math.max(0, data.tasks.length - data.taskLimit);
-			const taskHint = hiddenTasks
-				? `${hiddenTasks} more · /tako-tasks`
-				: "/tako-tasks details";
-			const footer: PanelSegment[] = [
-				{ text: "╰─ ", tone: "borderMuted" },
-				{
-					text: data.showTasks ? taskHint : "/tako-panel settings",
-					tone: "dim",
-				},
-			];
-			if (data.showTasks) {
-				footer.push(
-					{ text: "  ·  ", tone: "dim" },
-					{ text: "/tako-panel settings", tone: "dim" },
-				);
-			}
-			lines.push(paint(footer));
+			const footerPrefix = hiddenTasks ? `+${hiddenTasks} more · ` : "";
+			lines.push(
+				framedRule(
+					theme,
+					resolvedWidth,
+					"╰",
+					"╯",
+					[
+						{ text: `─ ${footerPrefix}`, tone: "borderMuted" },
+						{
+							text: "/tako-status · /tako-tasks · /tako-standup · /tako-panel",
+							tone: "dim",
+						},
+						{ text: " ", tone: "borderMuted" },
+					],
+					[{ text: "─", tone: "borderMuted" }],
+				),
+			);
 			return lines;
 		},
 		invalidate() {},
@@ -169,14 +443,38 @@ export function createBridgePanelErrorWidget(
 ) {
 	return {
 		render(width: number): string[] {
-			const clip = (text: string) =>
-				text.length <= width
-					? text
-					: `${text.slice(0, Math.max(0, width - 1))}…`;
+			const resolvedWidth = panelWidth(width);
 			return [
-				theme.fg("warning", clip("╭─ TAKO BRIDGE  ◇ Delayed")),
-				theme.fg("muted", clip(`│ ${message}`)),
-				theme.fg("dim", clip("╰─ /tako-status")),
+				framedRule(
+					theme,
+					resolvedWidth,
+					"╭",
+					"╮",
+					[
+						{ text: "─ ", tone: "borderMuted" },
+						{ text: "TAKO BRIDGE", tone: "accent", strong: true },
+						{ text: " ", tone: "borderMuted" },
+					],
+					[
+						{ text: "◇ DELAYED", tone: "warning", strong: true },
+						{ text: " ─", tone: "borderMuted" },
+					],
+				),
+				framedLine(theme, resolvedWidth, [
+					{ text: ` ${message}`, tone: "muted" },
+				]),
+				framedRule(
+					theme,
+					resolvedWidth,
+					"╰",
+					"╯",
+					[
+						{ text: "─ ", tone: "borderMuted" },
+						{ text: "/tako-status", tone: "dim" },
+						{ text: " ", tone: "borderMuted" },
+					],
+					[{ text: "─", tone: "borderMuted" }],
+				),
 			];
 		},
 		invalidate() {},
