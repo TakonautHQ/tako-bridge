@@ -67,6 +67,10 @@ import {
 	verifyAgenticManifest,
 	type TrustedSigningKey,
 } from "./manifest";
+import {
+	createBridgePanelErrorWidget,
+	createBridgePanelWidget,
+} from "./panel.js";
 import { normalizeBridgeApiBaseUrl } from "./server-url.js";
 import { parseStartArguments } from "./start";
 import {
@@ -209,51 +213,30 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					? conn.getBridgeStandupStatus(settings.standupProjectKey).catch(() => null)
 					: Promise.resolve(null),
 			]);
-			const ready = tasks.filter((task) => task.startability.startable).length;
 			const active = loadActiveAgenticRun(
 				undefined,
 				c.orgId,
 				piSessionId(ctx),
 			);
-			const lines = ["TAKO BRIDGE · Connected"];
-			if (settings.showRun) {
-				lines.push(
-					active
-						? `Run: ${active.taskKey} · ${active.executorPhase} · ${active.status}`
-						: "Run: Idle",
-				);
-			}
-			if (settings.showStandup) {
-				if (!settings.standupProjectKey) {
-					lines.push("Standup: Select a Project · /tako-panel");
-				} else if (!standup) {
-					lines.push(`Standup (${settings.standupProjectKey}): Unavailable`);
-				} else {
-					lines.push(
-						standup.status === "submitted"
-							? `Standup (${settings.standupProjectKey}): Submitted`
-							: `Standup (${settings.standupProjectKey}): Pending · /tako-standup`,
-					);
-				}
-			}
-			if (settings.showTasks) {
-				lines.push(
-					`Tasks: ${tasks.length} assigned · ${ready} ready · ${tasks.length - ready} blocked`,
-					...tasks.slice(0, settings.taskLimit).map((task) => {
-						const status = task.startability.startable ? "READY  " : "BLOCKED";
-						const reason = task.startability.startable
-							? ""
-							: ` — ${formatStartabilityReasons(task.startability.reasons)}`;
-						return `  ${status}  ${task.task_key}  ${task.task_title}${reason}`;
-					}),
-				);
-			}
-			ctx.ui.setWidget("tako-bridge-panel", lines);
+			ctx.ui.setWidget("tako-bridge-panel", (_tui, theme) =>
+				createBridgePanelWidget(
+					{
+						run: active,
+						showRun: settings.showRun,
+						showStandup: settings.showStandup,
+						showTasks: settings.showTasks,
+						standupProjectKey: settings.standupProjectKey,
+						standupStatus: standup?.status ?? null,
+						tasks,
+						taskLimit: settings.taskLimit,
+					},
+					theme,
+				),
+			);
 		} catch (error) {
-			ctx.ui.setWidget("tako-bridge-panel", [
-				"TAKO BRIDGE · Connection delayed",
-				`Refresh failed: ${errMsg(error)}`,
-			]);
+			ctx.ui.setWidget("tako-bridge-panel", (_tui, theme) =>
+				createBridgePanelErrorWidget(errMsg(error), theme),
+			);
 		}
 	}
 
@@ -879,7 +862,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					clientId,
 					sessionId,
 					sessionLabel: `${hostname()} — ${taskKey}`,
-					extensionVersion: "0.4.7",
+					extensionVersion: "0.4.8",
 					manifestSchemaVersion: 2,
 					idempotencyKey: `start:${sessionId}:${startNonce}`,
 					baseRefOverrides,
@@ -924,7 +907,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					organizationId: c.orgId,
 					projectId: started.project_id,
 					minimumRevision: projectSync?.acceptedRevision ?? 0,
-					extensionVersion: "0.4.7",
+					extensionVersion: "0.4.8",
 				});
 				const capabilityExpansion = capabilityExpansionRequired(
 					projectSync?.capabilityEnvelope ?? null,

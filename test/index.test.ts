@@ -525,6 +525,19 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		return { commands, events, pi };
 	}
 
+	function renderPanel(ctx: ReturnType<typeof commandContext>, width = 80) {
+		const calls = ctx.ui.setWidget.mock.calls.filter(
+			([id]) => id === "tako-bridge-panel",
+		);
+		const factory = calls.at(-1)?.[1];
+		expect(typeof factory).toBe("function");
+		const theme = {
+			fg: (_color: string, text: string) => text,
+			bold: (text: string) => text,
+		};
+		return factory({}, theme).render(width) as string[];
+	}
+
 	it("does not register commands backed by retired legacy MCP tools", () => {
 		const { commands } = setup();
 
@@ -546,9 +559,8 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 
 		await events.get("session_start")?.({}, ctx);
 
-		expect(ctx.ui.setWidget).toHaveBeenCalledWith(
-			"tako-bridge-panel",
-			expect.arrayContaining(["Standup (PAY): Pending · /tako-standup"]),
+		expect(renderPanel(ctx)).toContain(
+			"│ Run  Idle  ·  Standup  PAY · Pending",
 		);
 		await events.get("session_shutdown")?.({}, ctx);
 	});
@@ -681,14 +693,17 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 
 		await events.get("session_start")?.({}, ctx);
 
-		expect(ctx.ui.setWidget).toHaveBeenCalledWith("tako-bridge-panel", [
-			"TAKO BRIDGE · Connected",
-			"Run: Idle",
-			"Standup: Select a Project · /tako-panel",
-			"Tasks: 2 assigned · 1 ready · 1 blocked",
-			"  READY    PAY-142  Handle expired sessions",
-			"  BLOCKED  PAY-143  Rotate credentials — Default Playbook is not published.",
+		expect(renderPanel(ctx)).toEqual([
+			"╭─ TAKO BRIDGE  ● Connected",
+			"│ Run  Idle  ·  Standup  Not set",
+			"│ Work  1 ready  ·  1 blocked",
+			"│ ◆ PAY-142  Handle expired sessions",
+			"│ ◇ PAY-143  Rotate credentials",
+			"╰─ /tako-tasks details  ·  /tako-panel settings",
 		]);
+		const narrow = renderPanel(ctx, 38);
+		expect(narrow.every((line) => line.length <= 38)).toBe(true);
+		expect(narrow.join("\n")).not.toContain("Default Playbook");
 		await events.get("session_shutdown")?.({}, ctx);
 	});
 
@@ -776,7 +791,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			clientId: "client-1",
 			sessionId: "pi-session-1",
 			sessionLabel: expect.stringContaining("PAY-142"),
-			extensionVersion: "0.4.7",
+			extensionVersion: "0.4.8",
 			manifestSchemaVersion: 2,
 			baseRefOverrides: [],
 			idempotencyKey: expect.stringMatching(
