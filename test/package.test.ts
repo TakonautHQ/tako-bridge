@@ -48,7 +48,7 @@ function readPackage(): Record<string, any> {
 	return parsed as Record<string, any>;
 }
 
-function packAndInstallDependencies(home: string): string {
+function packPackage(home: string): string {
 	const packedDir = join(home, "packed");
 	const extractedDir = join(home, "extracted");
 	mkdirSync(packedDir, { recursive: true });
@@ -60,7 +60,11 @@ function packAndInstallDependencies(home: string): string {
 	const tarball = readdirSync(packedDir).find((name) => name.endsWith(".tgz"));
 	if (!tarball) throw new Error("bun pm pack did not produce a .tgz archive");
 	execFileSync("tar", ["-xzf", join(packedDir, tarball), "-C", extractedDir]);
-	const extractedPackage = join(extractedDir, "package");
+	return join(extractedDir, "package");
+}
+
+function packAndInstallDependencies(home: string): string {
+	const extractedPackage = packPackage(home);
 	execFileSync("bun", ["install", "--production"], {
 		cwd: extractedPackage,
 		stdio: "pipe",
@@ -165,6 +169,22 @@ describe("Pi package manifest", () => {
 		);
 		expect(existsSync(join(extractedPackage, "test"))).toBe(false);
 	}, 30_000);
+
+	it(
+		"installs packed production dependencies with npm",
+		() => {
+			const home = mkdtempSync(join(tmpdir(), "tako-bridge-npm-install-"));
+			tempHomes.push(home);
+			const extractedPackage = packPackage(home);
+			execFileSync(
+				"npm",
+				["install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
+				{ cwd: extractedPackage, stdio: "pipe" },
+			);
+			expect(existsSync(join(extractedPackage, "node_modules"))).toBe(true);
+		},
+		90_000,
+	);
 
 	it("autoloads Tako commands from a packed, isolated installation", async () => {
 		const home = mkdtempSync(join(tmpdir(), "tako-pi-home-"));
