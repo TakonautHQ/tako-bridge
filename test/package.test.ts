@@ -89,9 +89,17 @@ async function installedCommands(
 		});
 		let stdout = "";
 		let stderr = "";
+		let commands: Array<{ name: string }> | undefined;
+		let settled = false;
+		const fail = (error: Error) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			reject(error);
+		};
 		const timer = setTimeout(() => {
 			child.kill();
-			reject(new Error(`Timed out waiting for get_commands. stderr=${stderr}`));
+			fail(new Error(`Timed out waiting for get_commands. stderr=${stderr}`));
 		}, 10_000);
 
 		child.stdout?.on("data", (chunk) => {
@@ -101,9 +109,9 @@ async function installedCommands(
 				try {
 					const msg = JSON.parse(line);
 					if (msg.type === "response" && msg.command === "get_commands") {
+						commands = msg.data?.commands ?? [];
 						clearTimeout(timer);
 						child.kill();
-						resolvePromise(msg.data?.commands ?? []);
 						return;
 					}
 				} catch {
@@ -114,9 +122,16 @@ async function installedCommands(
 		child.stderr?.on("data", (chunk) => {
 			stderr += String(chunk);
 		});
-		child.on("error", (error) => {
+		child.on("error", fail);
+		child.on("close", () => {
+			if (settled) return;
+			if (!commands) {
+				fail(new Error(`Pi exited before get_commands. stderr=${stderr}`));
+				return;
+			}
+			settled = true;
 			clearTimeout(timer);
-			reject(error);
+			resolvePromise(commands);
 		});
 		child.stdin?.write(JSON.stringify({ type: "get_commands" }) + "\n");
 	});
