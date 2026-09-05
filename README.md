@@ -18,13 +18,16 @@ Tako Bridge refuses to start work when repository identity, GitHub access, Git i
 
 ## Install
 
-Install a pinned Git tag so updates are deliberate:
+Install a pinned Git tag from the project you are working in. Project-local installation is recommended so Tako Bridge commands and policy hooks load only in that project:
 
 ```bash
-pi install git:github.com/TakonautHQ/tako-bridge@v0.4.10
+cd /path/to/your/project
+pi install git:github.com/TakonautHQ/tako-bridge@v0.4.11 -l
 ```
 
-Start Pi, then run:
+Pi records the package in `.pi/settings.json` and installs it after the project is trusted. To intentionally load Tako Bridge in every Pi project, omit `-l`. If an older release is already installed globally, use `pi list`, remove the exact global source shown there with `pi remove SOURCE`, and then install it locally.
+
+Start Pi in that project, then run:
 
 ```text
 /tako-setup

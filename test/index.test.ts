@@ -211,7 +211,9 @@ function commandContext(notify = vi.fn()) {
 		ui: {
 			notify,
 			setWidget: vi.fn(),
-			custom: vi.fn(async (): Promise<string | null> => null),
+			custom: vi.fn(
+				async (_factory?: any, _options?: any): Promise<any> => null,
+			),
 			select: vi.fn(async (): Promise<string | undefined> => undefined),
 			confirm: vi.fn(async () => true),
 			editor: vi.fn(
@@ -246,6 +248,9 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			refreshSeconds: 30,
 			standupProjectKey: undefined,
 		};
+		mocks.savePanelSettings.mockImplementation((settings) => {
+			mocks.panelSettings = { ...settings };
+		});
 		mocks.listStartableTasks.mockResolvedValue({ tasks: [] });
 		mocks.getBridgeStandupStatus.mockResolvedValue({
 			project_key: "PAY",
@@ -663,13 +668,38 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		}
 	});
 
+	it("keeps panel settings in one custom toggle view", async () => {
+		const { commands } = setup();
+		const ctx = { ...commandContext(), mode: "tui" };
+
+		await commands.get("tako-panel")?.("", ctx);
+
+		expect(ctx.ui.custom).toHaveBeenCalledWith(
+			expect.any(Function),
+			expect.objectContaining({
+				overlay: true,
+				overlayOptions: expect.objectContaining({ anchor: "center" }),
+			}),
+		);
+		expect(ctx.ui.select).not.toHaveBeenCalled();
+	});
+
 	it("lets the developer hide and persist the Tako panel", async () => {
 		const { commands } = setup();
 		const ctx = { ...commandContext(), mode: "tui" };
-		ctx.ui.select = vi
-			.fn()
-			.mockResolvedValueOnce("Hide panel")
-			.mockResolvedValueOnce("Done");
+		ctx.ui.custom.mockImplementationOnce(async (factory: any) => {
+			const view = factory(
+				{ requestRender: vi.fn() },
+				{
+					fg: (_color: string, text: string) => text,
+					bg: (_color: string, text: string) => text,
+					bold: (text: string) => text,
+				},
+				{},
+				vi.fn(),
+			);
+			view.handleInput("\r");
+		});
 
 		await commands.get("tako-panel")?.("", ctx);
 
@@ -683,13 +713,58 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		);
 	});
 
+	it("does not restore stale panel settings after an in-flight refresh", async () => {
+		let resolveTasks!: (value: { tasks: [] }) => void;
+		mocks.listStartableTasks.mockImplementationOnce(
+			() =>
+				new Promise<{ tasks: [] }>((resolve) => {
+					resolveTasks = resolve;
+				}),
+		);
+		const { commands, events } = setup();
+		const ctx = { ...commandContext(), mode: "tui" };
+		ctx.ui.custom.mockImplementationOnce(async (factory: any) => {
+			const view = factory(
+				{ requestRender: vi.fn() },
+				{
+					fg: (_color: string, text: string) => text,
+					bg: (_color: string, text: string) => text,
+					bold: (text: string) => text,
+				},
+				{},
+				vi.fn(),
+			);
+			view.handleInput("\r");
+		});
+
+		const startup = events.get("session_start")?.({}, ctx);
+		await commands.get("tako-panel")?.("", ctx);
+		resolveTasks({ tasks: [] });
+		await startup;
+
+		expect(ctx.ui.setWidget).toHaveBeenLastCalledWith(
+			"tako-bridge-panel",
+			undefined,
+		);
+	});
+
 	it("lets the developer persist detailed panel Debug mode", async () => {
 		const { commands } = setup();
 		const ctx = { ...commandContext(), mode: "tui" };
-		ctx.ui.select = vi
-			.fn()
-			.mockResolvedValueOnce("Debug: off")
-			.mockResolvedValueOnce("Done");
+		ctx.ui.custom.mockImplementationOnce(async (factory: any) => {
+			const view = factory(
+				{ requestRender: vi.fn() },
+				{
+					fg: (_color: string, text: string) => text,
+					bg: (_color: string, text: string) => text,
+					bold: (text: string) => text,
+				},
+				{},
+				vi.fn(),
+			);
+			for (let index = 0; index < 7; index += 1) view.handleInput("\u001b[B");
+			view.handleInput("\r");
+		});
 
 		await commands.get("tako-panel")?.("", ctx);
 
@@ -702,21 +777,26 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 	it("lets the developer choose the maximum panel task rows", async () => {
 		const { commands } = setup();
 		const ctx = { ...commandContext(), mode: "tui" };
-		ctx.ui.select = vi
-			.fn()
-			.mockResolvedValueOnce("Task rows: 3")
-			.mockResolvedValueOnce("10")
-			.mockResolvedValueOnce("Done");
+		ctx.ui.custom.mockImplementationOnce(async (factory: any) => {
+			const view = factory(
+				{ requestRender: vi.fn() },
+				{
+					fg: (_color: string, text: string) => text,
+					bg: (_color: string, text: string) => text,
+					bold: (text: string) => text,
+				},
+				{},
+				vi.fn(),
+			);
+			for (let index = 0; index < 5; index += 1) view.handleInput("\u001b[B");
+			view.handleInput("\u001b[C");
+			view.handleInput("\u001b[C");
+		});
 
 		await commands.get("tako-panel")?.("", ctx);
 
-		expect(ctx.ui.select).toHaveBeenCalledWith("Task rows", [
-			"1",
-			"3",
-			"5",
-			"10",
-		]);
-		expect(mocks.savePanelSettings).toHaveBeenCalledWith(
+		expect(ctx.ui.select).not.toHaveBeenCalled();
+		expect(mocks.savePanelSettings).toHaveBeenLastCalledWith(
 			expect.objectContaining({ taskLimit: 10 }),
 			"/home/dev/.takonaut/bridge.json",
 		);
@@ -919,7 +999,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			clientId: "client-1",
 			sessionId: "pi-session-1",
 			sessionLabel: expect.stringContaining("PAY-142"),
-			extensionVersion: "0.4.10",
+			extensionVersion: "0.4.11",
 			manifestSchemaVersion: 2,
 			baseRefOverrides: [],
 			idempotencyKey: expect.stringMatching(
@@ -1703,6 +1783,21 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			}
 		},
 	);
+
+	it("does not apply Takonaut shell policy without an active Run", () => {
+		const { events } = setup();
+		mocks.storedAgenticRun = null;
+
+		const result = events.get("tool_call")?.(
+			{
+				toolName: "bash",
+				input: { command: "bun test --focused-migration-pinning" },
+			},
+			commandContext(),
+		);
+
+		expect(result).toBeUndefined();
+	});
 
 	it("blocks execution tool calls after emergency-off or cancellation is observed", () => {
 		const { events } = setup();

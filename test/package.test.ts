@@ -165,6 +165,16 @@ describe("Pi package manifest", () => {
 		}
 	});
 
+	it("recommends a pinned project-local installation", () => {
+		const version = readPackage().version;
+		const readme = readFileSync(join(packageRoot, "README.md"), "utf-8");
+
+		expect(readme).toContain(
+			`pi install git:github.com/TakonautHQ/tako-bridge@v${version} -l`,
+		);
+		expect(readme).toContain("project you are working in");
+	});
+
 	it("uses the package version for runtime identity and manifest negotiation", () => {
 		const version = readPackage().version;
 		expect(

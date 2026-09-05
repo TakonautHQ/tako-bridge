@@ -75,6 +75,7 @@ import {
 	type BridgePanelDebugData,
 	type SyncOperationDebug,
 } from "./panel.js";
+import { PanelSettingsView } from "./panel-settings.js";
 import { normalizeBridgeApiBaseUrl } from "./server-url.js";
 import { parseStartArguments } from "./start";
 import { TaskPicker } from "./task-picker.js";
@@ -171,6 +172,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	let stopTelemetry: (() => void) | null = null;
 	let panelTimer: ReturnType<typeof setInterval> | null = null;
 	let panelRefreshInFlight = false;
+	let panelRefreshQueued = false;
 	let cachedPanelTasks: StartableTask[] = [];
 	let cachedStandupStatus: "pending" | "submitted" | null = null;
 	let panelSync = idleSyncDebug();
@@ -278,6 +280,18 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		);
 	}
 
+	function renderConfiguredPanel(
+		ctx: ExtensionContext,
+		c: TakonautConfig,
+		settings: PanelSettings,
+	): void {
+		if (!settings.visible) {
+			ctx.ui.setWidget("tako-bridge-panel", undefined);
+			return;
+		}
+		renderCurrentPanel(ctx, c, settings);
+	}
+
 	function renderSyncDebugUpdate(
 		ctx: ExtensionContext,
 		c: TakonautConfig,
@@ -315,6 +329,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		const conn = ensure(ctx);
 		if (!conn) return;
 		if (panelRefreshInFlight) {
+			panelRefreshQueued = true;
 			panelSync = { ...panelSync, skipped: panelSync.skipped + 1 };
 			renderCurrentPanel(ctx, c, settings);
 			return;
@@ -352,7 +367,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				durationMs: Date.now() - startedAt,
 				errorCode: null,
 			};
-			renderCurrentPanel(ctx, c, settings);
+			renderConfiguredPanel(ctx, c, loadPanelSettings(c.configPath));
 		} catch (error) {
 			const timedOut =
 				error instanceof Error && error.message === "panel_refresh_timeout";
@@ -362,9 +377,18 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				durationMs: Date.now() - startedAt,
 				errorCode: timedOut ? "panel_refresh_timeout" : "panel_refresh_failed",
 			};
-			renderPanelRefreshError(ctx, settings);
+			const currentSettings = loadPanelSettings(c.configPath);
+			if (currentSettings.visible) {
+				renderPanelRefreshError(ctx, currentSettings);
+			} else {
+				ctx.ui.setWidget("tako-bridge-panel", undefined);
+			}
 		} finally {
 			panelRefreshInFlight = false;
+			if (panelRefreshQueued) {
+				panelRefreshQueued = false;
+				void refreshPanel(ctx, c, loadPanelSettings(c.configPath));
+			}
 		}
 	}
 
@@ -867,72 +891,35 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => {
 			const c = currentConfig(ctx);
 			const conn = ensure(ctx);
-			if (!c || !conn || !ctx.hasUI) return;
+			if (!c || !conn || !ctx.hasUI || ctx.mode !== "tui") return;
 			let settings = loadPanelSettings(c.configPath);
-			while (true) {
-				const choice = await ctx.ui.select("Tako Bridge panel", [
-					settings.visible ? "Hide panel" : "Show panel",
-					settings.showRun ? "Hide Run status" : "Show Run status",
-					settings.showTasks ? "Hide assigned tasks" : "Show assigned tasks",
-					settings.showStandup ? "Hide Standup status" : "Show Standup status",
-					`Standup Project: ${settings.standupProjectKey ?? "not selected"}`,
-					`Task rows: ${settings.taskLimit}`,
-					`Refresh: ${settings.refreshSeconds === 0 ? "manual" : `${settings.refreshSeconds}s`}`,
-					`Debug: ${settings.debug ? "on" : "off"}`,
-					"Refresh now",
-					"Done",
-				]);
-				if (!choice || choice === "Done") break;
-				if (choice === "Hide panel" || choice === "Show panel") {
-					settings = { ...settings, visible: !settings.visible };
-				} else if (choice.includes("Run status")) {
-					settings = { ...settings, showRun: !settings.showRun };
-				} else if (choice.includes("assigned tasks")) {
-					settings = { ...settings, showTasks: !settings.showTasks };
-				} else if (choice.includes("Standup status")) {
-					settings = { ...settings, showStandup: !settings.showStandup };
-				} else if (choice.startsWith("Standup Project:")) {
-					const { tasks } = await conn.listStartableTasks();
-					const projects = [...new Set(tasks.map((task) => task.project_key))];
-					const selected = await ctx.ui.select("Standup Project", projects);
-					if (selected) settings = { ...settings, standupProjectKey: selected };
-				} else if (choice.startsWith("Task rows:")) {
-					const selected = await ctx.ui.select("Task rows", [
-						"1",
-						"3",
-						"5",
-						"10",
-					]);
-					if (selected) {
-						settings = {
-							...settings,
-							taskLimit: Number(selected) as PanelSettings["taskLimit"],
-						};
-					}
-				} else if (choice.startsWith("Debug:")) {
-					settings = { ...settings, debug: !settings.debug };
-				} else if (choice.startsWith("Refresh:")) {
-					const selected = await ctx.ui.select("Refresh interval", [
-						"Manual",
-						"15 seconds",
-						"30 seconds",
-						"60 seconds",
-					]);
-					if (selected) {
-						settings = {
-							...settings,
-							refreshSeconds: (selected === "Manual"
-								? 0
-								: Number(
-										selected.split(" ")[0],
-									)) as PanelSettings["refreshSeconds"],
-						};
-					}
-				}
-				savePanelSettings(settings, c.configPath);
-				await refreshPanel(ctx, c, settings);
-				startPanelRefresh(ctx, c, settings);
-			}
+			const projects = [
+				...new Set(cachedPanelTasks.map((task) => task.project_key)),
+			];
+			await ctx.ui.custom<void>(
+				(tui, theme, _keybindings, done) =>
+					new PanelSettingsView(settings, projects, theme, {
+						onSettingsChange: (next) => {
+							settings = next;
+							savePanelSettings(settings, c.configPath);
+							void refreshPanel(ctx, c, settings);
+							startPanelRefresh(ctx, c, settings);
+						},
+						onRefresh: () => void refreshPanel(ctx, c, settings),
+						onDone: () => done(undefined),
+						onChange: () => tui.requestRender(),
+					}),
+				{
+					overlay: true,
+					overlayOptions: {
+						anchor: "center",
+						width: "60%",
+						minWidth: 48,
+						maxHeight: "80%",
+						margin: 1,
+					},
+				},
+			);
 		},
 	});
 
@@ -1168,7 +1155,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					clientId,
 					sessionId,
 					sessionLabel: `${hostname()} - ${taskKey}`,
-					extensionVersion: "0.4.10",
+					extensionVersion: "0.4.11",
 					manifestSchemaVersion: 2,
 					idempotencyKey: `start:${sessionId}:${startNonce}`,
 					baseRefOverrides,
@@ -1213,7 +1200,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					organizationId: c.orgId,
 					projectId: started.project_id,
 					minimumRevision: projectSync?.acceptedRevision ?? 0,
-					extensionVersion: "0.4.10",
+					extensionVersion: "0.4.11",
 				});
 				const capabilityExpansion = capabilityExpansionRequired(
 					projectSync?.capabilityEnvelope ?? null,
@@ -2517,8 +2504,9 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			if (!c) return;
 			const sessionId = piSessionId(ctx);
 			const active = loadActiveAgenticRun(undefined, c.orgId, sessionId);
+			if (!active) return;
 			if (
-				active?.featureDisabled ||
+				active.featureDisabled ||
 				active?.reauthorizationRequired ||
 				active?.status === "cancellation_requested" ||
 				(active && TERMINAL_AGENTIC_STATUSES.has(active.status))
