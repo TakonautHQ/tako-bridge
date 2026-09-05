@@ -89,6 +89,7 @@ import {
 	isFeatureDisabledError,
 	startAgentTelemetryReporter,
 } from "./telemetry";
+import { Type } from "typebox";
 
 function safePathSegment(value: string): string {
 	return value.replace(/[^a-zA-Z0-9-]/g, "_");
@@ -228,6 +229,117 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		};
 		return sessionContext.sessionManager.getSessionId();
 	}
+
+	function gatewayToolResult(payload: unknown) {
+		return {
+			content: [{ type: "text" as const, text: JSON.stringify(payload) }],
+			details: {},
+		};
+	}
+
+	pi.registerTool({
+		name: "tako_search_capabilities",
+		label: "Search Takonaut",
+		description:
+			"Search up to five self-service Takonaut capabilities authorized for the connected user.",
+		promptSnippet:
+			"Search the connected user's authorized Takonaut self-service capabilities",
+		parameters: Type.Object(
+			{
+				query: Type.String({ maxLength: 200 }),
+			},
+			{ additionalProperties: false },
+		),
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			if (signal?.aborted)
+				throw new Error("Takonaut capability search cancelled");
+			const conn = ensure(ctx);
+			if (!conn) return gatewayToolResult({ error: "not_connected" });
+			return gatewayToolResult(await conn.searchCapabilities(params.query));
+		},
+	});
+
+	pi.registerTool({
+		name: "tako_read",
+		label: "Read Takonaut",
+		description:
+			"Run one bounded, read-only Takonaut capability returned by tako_search_capabilities.",
+		promptGuidelines: [
+			"Use tako_read only with a read capability ID returned by tako_search_capabilities.",
+		],
+		parameters: Type.Object(
+			{
+				capability_id: Type.String({ minLength: 1, maxLength: 100 }),
+				arguments: Type.Optional(
+					Type.Record(Type.String(), Type.Unknown(), { maxProperties: 50 }),
+				),
+			},
+			{ additionalProperties: false },
+		),
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			if (signal?.aborted) throw new Error("Takonaut read cancelled");
+			const conn = ensure(ctx);
+			if (!conn) return gatewayToolResult({ error: "not_connected" });
+			return gatewayToolResult(
+				await conn.readCapability(params.capability_id, params.arguments ?? {}),
+			);
+		},
+	});
+
+	pi.registerTool({
+		name: "tako_action",
+		label: "Act in Takonaut",
+		description:
+			"Prepare one authorized self-service Takonaut mutation, show a redacted preview for local confirmation, then execute it once.",
+		promptGuidelines: [
+			"Use tako_action only with a mutation capability ID returned by tako_search_capabilities; never claim success before its result.",
+		],
+		parameters: Type.Object(
+			{
+				capability_id: Type.String({ minLength: 1, maxLength: 100 }),
+				arguments: Type.Record(Type.String(), Type.Unknown(), {
+					maxProperties: 50,
+				}),
+			},
+			{ additionalProperties: false },
+		),
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			if (signal?.aborted) throw new Error("Takonaut action cancelled");
+			if (!ctx.hasUI) {
+				return gatewayToolResult({
+					status: "confirmation_required",
+					message: "Takonaut mutations require interactive confirmation.",
+				});
+			}
+			const conn = ensure(ctx);
+			if (!conn) return gatewayToolResult({ error: "not_connected" });
+			const actionArguments = params.arguments ?? {};
+			const prepared = await conn.prepareAction(
+				params.capability_id,
+				actionArguments,
+			);
+			const approved = await ctx.ui.confirm(
+				"Confirm Takonaut action",
+				`${JSON.stringify(prepared.preview, null, 2)}\n\n` +
+					`Arguments digest: ${prepared.arguments_digest}\n` +
+					`Expires: ${prepared.expires_at}`,
+			);
+			if (!approved) {
+				return gatewayToolResult({
+					status: "cancelled",
+					message: "The Takonaut action was not executed.",
+				});
+			}
+			if (signal?.aborted) throw new Error("Takonaut action cancelled");
+			return gatewayToolResult(
+				await conn.executeAction(
+					prepared.action_token,
+					params.capability_id,
+					actionArguments,
+				),
+			);
+		},
+	});
 
 	function stopAgentTelemetry(): void {
 		stopTelemetry?.();
@@ -1155,7 +1267,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					clientId,
 					sessionId,
 					sessionLabel: `${hostname()} - ${taskKey}`,
-					extensionVersion: "0.4.11",
+					extensionVersion: "0.4.12",
 					manifestSchemaVersion: 2,
 					idempotencyKey: `start:${sessionId}:${startNonce}`,
 					baseRefOverrides,
@@ -1200,7 +1312,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					organizationId: c.orgId,
 					projectId: started.project_id,
 					minimumRevision: projectSync?.acceptedRevision ?? 0,
-					extensionVersion: "0.4.11",
+					extensionVersion: "0.4.12",
 				});
 				const capabilityExpansion = capabilityExpansionRequired(
 					projectSync?.capabilityEnvelope ?? null,

@@ -36,6 +36,10 @@ const mocks = vi.hoisted(() => ({
 	calls: [] as string[],
 	close: vi.fn(),
 	listStartableTasks: vi.fn(),
+	searchCapabilities: vi.fn(),
+	readCapability: vi.fn(),
+	prepareAction: vi.fn(),
+	executeAction: vi.fn(),
 	createBridgeStandupDraft: vi.fn(),
 	getBridgeStandupStatus: vi.fn(),
 	panelSettings: {
@@ -123,6 +127,10 @@ vi.mock("../src/client", () => ({
 	TakonautClient: class {
 		close = mocks.close;
 		listStartableTasks = mocks.listStartableTasks;
+		searchCapabilities = mocks.searchCapabilities;
+		readCapability = mocks.readCapability;
+		prepareAction = mocks.prepareAction;
+		executeAction = mocks.executeAction;
 		createBridgeStandupDraft = mocks.createBridgeStandupDraft;
 		getBridgeStandupStatus = mocks.getBridgeStandupStatus;
 		getBridgeTaskContext = mocks.getBridgeTaskContext;
@@ -205,6 +213,14 @@ import takonautExtension from "../src/index";
 
 type Handler = (args: any, ctx: any) => Promise<void> | void;
 
+function parseJsonRecord(value: string): Record<string, any> {
+	try {
+		return JSON.parse(value);
+	} catch (error) {
+		throw new Error(`Expected JSON tool result: ${String(error)}`);
+	}
+}
+
 function commandContext(notify = vi.fn()) {
 	return {
 		hasUI: true,
@@ -215,7 +231,7 @@ function commandContext(notify = vi.fn()) {
 				async (_factory?: any, _options?: any): Promise<any> => null,
 			),
 			select: vi.fn(async (): Promise<string | undefined> => undefined),
-			confirm: vi.fn(async () => true),
+			confirm: vi.fn(async (_title: string, _message: string) => true),
 			editor: vi.fn(
 				async (_title: string, value: string): Promise<string | undefined> =>
 					value,
@@ -521,9 +537,11 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 	function setup() {
 		const commands = new Map<string, Handler>();
 		const events = new Map<string, Handler>();
+		const tools = new Map<string, any>();
 		const pi = {
 			registerCommand: (name: string, options: { handler: Handler }) =>
 				commands.set(name, options.handler),
+			registerTool: (definition: any) => tools.set(definition.name, definition),
 			on: (name: string, handler: Handler) => events.set(name, handler),
 			exec: vi.fn(async (_command: string, _args: string[]) => ({
 				stdout: "ok\n",
@@ -533,7 +551,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			sendUserMessage: vi.fn(),
 		};
 		takonautExtension(pi as any);
-		return { commands, events, pi };
+		return { commands, events, tools, pi };
 	}
 
 	function renderPanel(ctx: ReturnType<typeof commandContext>, width = 80) {
@@ -548,6 +566,139 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		};
 		return factory({}, theme).render(width) as string[];
 	}
+
+	it("registers only the three stable lazy capability tools", () => {
+		const { tools } = setup();
+
+		expect([...tools.keys()]).toEqual([
+			"tako_search_capabilities",
+			"tako_read",
+			"tako_action",
+		]);
+	});
+
+	it("searches and reads only through the bounded Takonaut gateway", async () => {
+		mocks.searchCapabilities.mockResolvedValue({
+			capabilities: [
+				{
+					id: "leave.list_own",
+					title: "My leave requests",
+					summary: "List only my leave requests.",
+					mode: "read",
+				},
+			],
+			count: 1,
+		});
+		mocks.readCapability.mockResolvedValue({
+			capability_id: "leave.list_own",
+			result: [],
+			truncated: false,
+			total_count: 0,
+		});
+		const { tools } = setup();
+		const ctx = commandContext();
+
+		const searched = await tools
+			.get("tako_search_capabilities")
+			.execute("call-1", { query: "my leave" }, undefined, undefined, ctx);
+		const read = await tools
+			.get("tako_read")
+			.execute(
+				"call-2",
+				{ capability_id: "leave.list_own", arguments: {} },
+				undefined,
+				undefined,
+				ctx,
+			);
+
+		expect(mocks.searchCapabilities).toHaveBeenCalledWith("my leave");
+		expect(mocks.readCapability).toHaveBeenCalledWith("leave.list_own", {});
+		expect(parseJsonRecord(searched.content[0].text).count).toBe(1);
+		expect(parseJsonRecord(read.content[0].text).capability_id).toBe(
+			"leave.list_own",
+		);
+	});
+
+	it("prepares, locally confirms, and executes a mutation without exposing its token", async () => {
+		mocks.prepareAction.mockResolvedValue({
+			action_token: "server-secret-token",
+			capability_id: "leave.create",
+			arguments_digest: "a".repeat(64),
+			preview: {
+				action: "Create my leave request",
+				start_date: "2032-06-14",
+				end_date: "2032-06-15",
+				note_present: true,
+			},
+			expires_at: "2032-06-14T12:05:00Z",
+		});
+		mocks.executeAction.mockResolvedValue({
+			status: "executed",
+			capability_id: "leave.create",
+			result: { status: "created", leave_id: "leave-1" },
+			idempotent_replay: false,
+		});
+		const { tools } = setup();
+		const ctx = commandContext();
+		const args = {
+			start_date: "2032-06-14",
+			end_date: "2032-06-15",
+			note: "private family detail",
+		};
+
+		const result = await tools
+			.get("tako_action")
+			.execute(
+				"call-3",
+				{ capability_id: "leave.create", arguments: args },
+				undefined,
+				undefined,
+				ctx,
+			);
+
+		expect(mocks.prepareAction).toHaveBeenCalledWith("leave.create", args);
+		expect(ctx.ui.confirm).toHaveBeenCalledWith(
+			"Confirm Takonaut action",
+			expect.stringContaining("Create my leave request"),
+		);
+		expect(ctx.ui.confirm.mock.calls[0][1]).not.toContain(
+			"private family detail",
+		);
+		expect(mocks.executeAction).toHaveBeenCalledWith(
+			"server-secret-token",
+			"leave.create",
+			args,
+		);
+		expect(JSON.stringify(result)).not.toContain("server-secret-token");
+		expect(parseJsonRecord(result.content[0].text).result.leave_id).toBe(
+			"leave-1",
+		);
+	});
+
+	it("refuses mutation execution when local confirmation is unavailable", async () => {
+		mocks.prepareAction.mockResolvedValue({
+			action_token: "server-secret-token",
+			capability_id: "wfh.create",
+			arguments_digest: "b".repeat(64),
+			preview: { action: "Create my WFH request", date: "2032-06-14" },
+			expires_at: "2032-06-14T12:05:00Z",
+		});
+		const { tools } = setup();
+		const ctx = { ...commandContext(), hasUI: false };
+
+		const result = await tools
+			.get("tako_action")
+			.execute(
+				"call-4",
+				{ capability_id: "wfh.create", arguments: { date: "2032-06-14" } },
+				undefined,
+				undefined,
+				ctx,
+			);
+
+		expect(mocks.executeAction).not.toHaveBeenCalled();
+		expect(result.content[0].text).toContain("interactive confirmation");
+	});
 
 	it("does not register commands backed by retired legacy MCP tools", () => {
 		const { commands } = setup();
@@ -999,7 +1150,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			clientId: "client-1",
 			sessionId: "pi-session-1",
 			sessionLabel: expect.stringContaining("PAY-142"),
-			extensionVersion: "0.4.11",
+			extensionVersion: "0.4.12",
 			manifestSchemaVersion: 2,
 			baseRefOverrides: [],
 			idempotencyKey: expect.stringMatching(

@@ -247,31 +247,69 @@ export interface AgentTelemetrySnapshot {
 	instances: AgentTelemetryInstance[];
 }
 
+export interface PersonalCapabilitySummary {
+	id: string;
+	title: string;
+	summary: string;
+	mode: "read" | "mutation";
+}
+
+export interface PersonalCapabilitySearchResult {
+	capabilities: PersonalCapabilitySummary[];
+	count: number;
+}
+
+export interface PreparedPersonalAction {
+	action_token: string;
+	capability_id: string;
+	arguments_digest: string;
+	preview: Record<string, unknown>;
+	expires_at: string;
+}
+
+export interface ExecutedPersonalAction {
+	status: "executed";
+	capability_id: string;
+	result: Record<string, unknown>;
+	idempotent_replay: boolean;
+}
+
 export class TakonautClient {
 	private client: Client;
 	private connected = false;
+	private connectPromise: Promise<void> | undefined;
 
 	constructor(private cfg: TakonautConfig) {
 		this.client = new Client(
-			{ name: "tako-bridge", version: "0.4.11" },
+			{ name: "tako-bridge", version: "0.4.12" },
 			{ capabilities: {} },
 		);
 	}
 
 	private async ensure(): Promise<void> {
 		if (this.connected) return;
-		const endpoint = bridgeServerUrl(this.cfg.serverUrl, "Takonaut MCP URL");
-		const transport = new StreamableHTTPClientTransport(endpoint, {
-			requestInit: {
-				redirect: "error",
-				headers: {
-					"X-API-Key": this.cfg.apiKey,
-					"X-Organization-Id": this.cfg.orgId,
-				},
-			},
-		});
-		await this.client.connect(transport);
-		this.connected = true;
+		if (!this.connectPromise) {
+			this.connectPromise = (async () => {
+				const endpoint = bridgeServerUrl(
+					this.cfg.serverUrl,
+					"Takonaut MCP URL",
+				);
+				const transport = new StreamableHTTPClientTransport(endpoint, {
+					requestInit: {
+						redirect: "error",
+						headers: {
+							"X-API-Key": this.cfg.apiKey,
+							"X-Organization-Id": this.cfg.orgId,
+						},
+					},
+				});
+				await this.client.connect(transport);
+				this.connected = true;
+			})().finally(() => {
+				this.connectPromise = undefined;
+			});
+		}
+		await this.connectPromise;
 	}
 
 	private async call(
@@ -298,6 +336,49 @@ export class TakonautClient {
 			"list_startable_tasks",
 			{ project_key: projectKey },
 			timeoutMs,
+		);
+	}
+
+	searchCapabilities(query: string): Promise<PersonalCapabilitySearchResult> {
+		return this.call("bridge_search_capabilities", { query }, 10_000);
+	}
+
+	readCapability(
+		capabilityId: string,
+		args: Record<string, unknown>,
+	): Promise<Record<string, unknown>> {
+		return this.call(
+			"bridge_read_capability",
+			{ capability_id: capabilityId, arguments: args },
+			10_000,
+		);
+	}
+
+	prepareAction(
+		capabilityId: string,
+		args: Record<string, unknown>,
+	): Promise<PreparedPersonalAction> {
+		return this.call(
+			"bridge_prepare_action",
+			{ capability_id: capabilityId, arguments: args },
+			10_000,
+		);
+	}
+
+	executeAction(
+		actionToken: string,
+		capabilityId: string,
+		args: Record<string, unknown>,
+	): Promise<ExecutedPersonalAction> {
+		return this.call(
+			"bridge_execute_action",
+			{
+				action_token: actionToken,
+				capability_id: capabilityId,
+				arguments: args,
+				confirmed: true,
+			},
+			10_000,
 		);
 	}
 
@@ -805,6 +886,9 @@ export class TakonautClient {
 	}
 
 	async close(): Promise<void> {
+		if (this.connectPromise) {
+			await this.connectPromise.catch(() => undefined);
+		}
 		if (this.connected) {
 			try {
 				await this.client.close();

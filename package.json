@@ -1,6 +1,6 @@
 {
   "name": "@takonaut/tako-bridge",
-  "version": "0.4.11",
+  "version": "0.4.12",
   "description": "Tako Bridge for Pi — governed Takonaut work, repository verification, durable recovery, and human-reviewed delivery evidence.",
   "license": "Apache-2.0",
   "type": "module",

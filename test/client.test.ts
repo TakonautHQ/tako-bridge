@@ -125,6 +125,66 @@ describe("TakonautClient transport", () => {
 		expect(mocks.connect).not.toHaveBeenCalled();
 	});
 
+	it("deduplicates concurrent connection attempts", async () => {
+		let finishConnect: (() => void) | undefined;
+		mocks.connect.mockImplementationOnce(
+			() =>
+				new Promise<void>((resolve) => {
+					finishConnect = resolve;
+				}),
+		);
+		const client = new TakonautClient(cfg);
+
+		const search = client.searchCapabilities("my leave");
+		const read = client.readCapability("leave.list_own", {});
+		await vi.waitFor(() => expect(mocks.connect).toHaveBeenCalledOnce());
+		finishConnect?.();
+		await Promise.all([search, read]);
+
+		expect(mocks.streamableTransport).toHaveBeenCalledOnce();
+		expect(mocks.connect).toHaveBeenCalledOnce();
+	});
+
+	it("routes only bounded gateway calls for discovery, reads, and actions", async () => {
+		const client = new TakonautClient(cfg);
+		await client.searchCapabilities("my leave");
+		await client.readCapability("leave.list_own", { start_date: "2032-01-01" });
+		await client.prepareAction("leave.create", { start_date: "2032-01-02" });
+		await client.executeAction("token", "leave.create", {
+			start_date: "2032-01-02",
+		});
+
+		expect(mocks.callTool.mock.calls.map(([request]) => request)).toEqual([
+			{
+				name: "bridge_search_capabilities",
+				arguments: { query: "my leave" },
+			},
+			{
+				name: "bridge_read_capability",
+				arguments: {
+					capability_id: "leave.list_own",
+					arguments: { start_date: "2032-01-01" },
+				},
+			},
+			{
+				name: "bridge_prepare_action",
+				arguments: {
+					capability_id: "leave.create",
+					arguments: { start_date: "2032-01-02" },
+				},
+			},
+			{
+				name: "bridge_execute_action",
+				arguments: {
+					action_token: "token",
+					capability_id: "leave.create",
+					arguments: { start_date: "2032-01-02" },
+					confirmed: true,
+				},
+			},
+		]);
+	});
+
 	it("reuses one connection and closes it on shutdown", async () => {
 		const client = new TakonautClient(cfg);
 		await client.listStartableTasks();

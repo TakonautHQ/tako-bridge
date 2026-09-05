@@ -22,7 +22,7 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.4.11 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.4.12 -l
 ```
 
 Pi records the package in `.pi/settings.json` and installs it after the project is trusted. To intentionally load Tako Bridge in every Pi project, omit `-l`. If an older release is already installed globally, use `pi list`, remove the exact global source shown there with `pi remove SOURCE`, and then install it locally.
@@ -88,6 +88,16 @@ Human decisions remain in Takonaut's Review queue. Approval completes the govern
 | `/tako-tasks` | Search current assigned work by key, title, Project, Sprint, or Stage, then open the selected item in Takonaut. Sprint Projects show the active Sprint; Kanban Projects show pulled, unarchived board work. |
 | `/tako-panel` | Configure the persistent Tako Bridge panel above Pi's prompt editor. |
 | `/tako-standup` | Draft a Standup from the current Pi session and bounded Git activity, then open the reviewed draft in Takonaut. |
+
+### Authorized Takonaut capabilities
+
+Bridge gives Pi three small model tools instead of exposing Takonaut's full MCP catalog:
+
+- `tako_search_capabilities` returns at most five capabilities currently allowed for the connected user.
+- `tako_read` runs one bounded read, such as current assigned work, leave categories, or the user's own leave/WFH requests.
+- `tako_action` prepares an own-record leave/WFH create or cancellation, shows a redacted preview and argument digest in Pi, and executes only after local confirmation.
+
+The server filters discovery by the active organization, live membership, **Developer Agents** gate, current RBAC permissions, and the personal key's permission ceiling. It repeats those checks when a tool is called. Prepared actions expire after five minutes, are bound to the exact user, organization, device key, capability, and arguments, and are replay-safe across server workers. Approval and organization-wide administration are never exposed through these tools.
 
 ### Pi status panel and Standup draft
 
