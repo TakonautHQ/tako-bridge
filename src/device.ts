@@ -80,6 +80,7 @@ export async function runDeviceLogin(
 				`Or, on any device, go to ${bareVerificationUrl} and enter code:  ${user_code}`,
 			);
 		}
+		deps.log("Check your browser to complete the Takonaut login flow.");
 		deps.openUrl?.(url);
 	} else {
 		deps.log("To connect Takonaut:");

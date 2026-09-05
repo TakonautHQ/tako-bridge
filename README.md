@@ -22,7 +22,7 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.4.12 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.4.13 -l
 ```
 
 Pi records the package in `.pi/settings.json` and installs it after the project is trusted. To intentionally load Tako Bridge in every Pi project, omit `-l`. If an older release is already installed globally, use `pi list`, remove the exact global source shown there with `pi remove SOURCE`, and then install it locally.

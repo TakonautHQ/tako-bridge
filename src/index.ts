@@ -70,6 +70,7 @@ import {
 } from "./manifest";
 import {
 	createBridgePanelErrorWidget,
+	createBridgePanelLoginWidget,
 	createBridgePanelWidget,
 	type BridgePanelData,
 	type BridgePanelDebugData,
@@ -1267,7 +1268,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					clientId,
 					sessionId,
 					sessionLabel: `${hostname()} - ${taskKey}`,
-					extensionVersion: "0.4.12",
+					extensionVersion: "0.4.13",
 					manifestSchemaVersion: 2,
 					idempotencyKey: `start:${sessionId}:${startNonce}`,
 					baseRefOverrides,
@@ -1312,7 +1313,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					organizationId: c.orgId,
 					projectId: started.project_id,
 					minimumRevision: projectSync?.acceptedRevision ?? 0,
-					extensionVersion: "0.4.12",
+					extensionVersion: "0.4.13",
 				});
 				const capabilityExpansion = capabilityExpansionRequired(
 					projectSync?.capabilityEnvelope ?? null,
@@ -2662,7 +2663,14 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		const c = cfg ?? (cfg = loadConfig());
-		if (!c) return;
+		if (!c) {
+			if (ctx.mode === "tui" && ctx.ui?.setWidget) {
+				ctx.ui.setWidget("tako-bridge-panel", (_tui, theme) =>
+					createBridgePanelLoginWidget(theme),
+				);
+			}
+			return;
+		}
 		const panelSettings = loadPanelSettings(c.configPath);
 		await refreshPanel(ctx, c, panelSettings);
 		startPanelRefresh(ctx, c, panelSettings);

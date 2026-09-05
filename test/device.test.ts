@@ -24,7 +24,8 @@ function deps(responses: HttpResult[]): {
 						user_code: "WXYZ-2345",
 						interval: 1,
 						verification_uri: "https://x/connect-bridge",
-						verification_uri_complete: "https://x/connect-bridge?code=WXYZ-2345",
+						verification_uri_complete:
+							"https://x/connect-bridge?code=WXYZ-2345",
 					},
 				};
 			}
@@ -83,6 +84,9 @@ describe("runDeviceLogin", () => {
 		expect(combined).toContain("https://x/connect-bridge?code=WXYZ-2345");
 		expect(combined).toContain("https://x/connect-bridge");
 		expect(combined).toContain("WXYZ-2345");
+		expect(combined).toContain(
+			"Check your browser to complete the Takonaut login flow.",
+		);
 	});
 
 	it("throws on a non-pending error from token", async () => {

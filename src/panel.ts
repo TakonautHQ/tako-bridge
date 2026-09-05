@@ -541,6 +541,52 @@ export function createBridgePanelWidget(
 	};
 }
 
+export function createBridgePanelLoginWidget(theme: PanelTheme) {
+	return {
+		render(width: number): string[] {
+			const resolvedWidth = panelWidth(width);
+			return [
+				framedRule(
+					theme,
+					resolvedWidth,
+					"╭",
+					"╮",
+					[
+						{ text: "─ ", tone: "borderMuted" },
+						{ text: "TAKO BRIDGE", tone: "accent", strong: true },
+						{ text: " ", tone: "borderMuted" },
+					],
+					[
+						{ text: "○ SIGN IN", tone: "warning", strong: true },
+						{ text: " ─", tone: "borderMuted" },
+					],
+				),
+				framedLine(theme, resolvedWidth, [
+					{ text: " Connect Takonaut to see your work here.", tone: "muted" },
+				]),
+				framedSplitLine(
+					theme,
+					resolvedWidth,
+					[
+						{ text: " NEXT", tone: "dim", strong: true },
+						{ text: "  Start secure device login", tone: "text" },
+					],
+					[{ text: "/tako-login", tone: "accent", strong: true }],
+				),
+				framedRule(
+					theme,
+					resolvedWidth,
+					"╰",
+					"╯",
+					[{ text: "─ ", tone: "borderMuted" }],
+					[{ text: "─", tone: "borderMuted" }],
+				),
+			];
+		},
+		invalidate() {},
+	};
+}
+
 export function createBridgePanelErrorWidget(
 	message: string,
 	theme: PanelTheme,

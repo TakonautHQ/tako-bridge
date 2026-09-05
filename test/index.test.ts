@@ -34,6 +34,17 @@ const taskContext = {
 
 const mocks = vi.hoisted(() => ({
 	calls: [] as string[],
+	config: {
+		serverUrl: "https://takonaut.test/mcp/",
+		apiKey: "device-secret",
+		orgId: "org-123",
+		repoRoot: "/work/repo",
+		protectedBranches: ["main"],
+		projectRepos: {},
+		credentialSource: "secure file",
+		configPath: "/home/dev/.takonaut/bridge.json",
+		credentialPath: "/home/dev/.takonaut/credentials.json",
+	} as Record<string, unknown> | null,
 	close: vi.fn(),
 	listStartableTasks: vi.fn(),
 	searchCapabilities: vi.fn(),
@@ -104,17 +115,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../src/config", () => ({
-	loadConfig: () => ({
-		serverUrl: "https://takonaut.test/mcp/",
-		apiKey: "device-secret",
-		orgId: "org-123",
-		repoRoot: "/work/repo",
-		protectedBranches: ["main"],
-		projectRepos: {},
-		credentialSource: "secure file",
-		configPath: "/home/dev/.takonaut/bridge.json",
-		credentialPath: "/home/dev/.takonaut/credentials.json",
-	}),
+	loadConfig: () => mocks.config,
 	saveConfig: vi.fn(),
 	loadPanelSettings: () => mocks.panelSettings,
 	savePanelSettings: mocks.savePanelSettings,
@@ -252,6 +253,17 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		mocks.calls.length = 0;
+		mocks.config = {
+			serverUrl: "https://takonaut.test/mcp/",
+			apiKey: "device-secret",
+			orgId: "org-123",
+			repoRoot: "/work/repo",
+			protectedBranches: ["main"],
+			projectRepos: {},
+			credentialSource: "secure file",
+			configPath: "/home/dev/.takonaut/bridge.json",
+			credentialPath: "/home/dev/.takonaut/credentials.json",
+		};
 		mocks.storedAgenticRun = null;
 		mocks.storedProjectSync = null;
 		mocks.panelSettings = {
@@ -714,6 +726,22 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		expect(commands.has("tako-resume")).toBe(true);
 	});
 
+	it("shows login guidance in the panel when Bridge is not connected", async () => {
+		mocks.config = null;
+		const { events } = setup();
+		const ctx = { ...commandContext(), mode: "tui" };
+
+		await events.get("session_start")?.({}, ctx);
+
+		const lines = renderPanel(ctx);
+		const text = lines.join("\n");
+		expect(lines.every((line) => visibleWidth(line) === 80)).toBe(true);
+		expect(text).toContain("SIGN IN");
+		expect(text).toContain("Connect Takonaut to see your work here.");
+		expect(text).toContain("/tako-login");
+		expect(mocks.listStartableTasks).not.toHaveBeenCalled();
+	});
+
 	it("shows the selected Project Standup status in the Pi panel", async () => {
 		mocks.panelSettings = { ...mocks.panelSettings, standupProjectKey: "PAY" };
 		const { events } = setup();
@@ -1150,7 +1178,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			clientId: "client-1",
 			sessionId: "pi-session-1",
 			sessionLabel: expect.stringContaining("PAY-142"),
-			extensionVersion: "0.4.12",
+			extensionVersion: "0.4.13",
 			manifestSchemaVersion: 2,
 			baseRefOverrides: [],
 			idempotencyKey: expect.stringMatching(
