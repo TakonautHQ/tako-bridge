@@ -22,7 +22,7 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.4.13 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.4.14 -l
 ```
 
 Pi records the package in `.pi/settings.json` and installs it after the project is trusted. To intentionally load Tako Bridge in every Pi project, omit `-l`. If an older release is already installed globally, use `pi list`, remove the exact global source shown there with `pi remove SOURCE`, and then install it locally.
@@ -95,9 +95,9 @@ Bridge gives Pi three small model tools instead of exposing Takonaut's full MCP 
 
 - `tako_search_capabilities` returns at most five capabilities currently allowed for the connected user.
 - `tako_read` runs one bounded read, such as current assigned work, leave categories, or the user's own leave/WFH requests.
-- `tako_action` prepares an own-record leave/WFH create or cancellation, shows a redacted preview and argument digest in Pi, and executes only after local confirmation.
+- `tako_action` prepares task creation in a Sprint Project's active Sprint or an own-record leave/WFH create or cancellation, shows a redacted preview and argument digest in Pi, and executes only after local confirmation.
 
-The server filters discovery by the active organization, live membership, **Developer Agents** gate, current RBAC permissions, and the personal key's permission ceiling. It repeats those checks when a tool is called. Prepared actions expire after five minutes, are bound to the exact user, organization, device key, capability, and arguments, and are replay-safe across server workers. Approval and organization-wide administration are never exposed through these tools.
+The server filters discovery by the active organization, live membership, **Developer Agents** gate, current RBAC permissions, and the personal key's permission ceiling. It repeats those checks when a tool is called. Creating a Task requires `tasks.create` on the selected Project and an active Sprint; Kanban Projects and Projects without an active Sprint are refused. External MCP clients can opt into the same placement with `create_task(assign_to_current_sprint=true)`. Prepared actions expire after five minutes, are bound to the exact user, organization, device key, capability, and arguments, and are replay-safe across server workers. Approval and organization-wide administration are never exposed through these tools.
 
 ### Pi status panel and Standup draft
 
