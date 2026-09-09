@@ -1465,7 +1465,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					clientId,
 					sessionId,
 					sessionLabel: `${hostname()} - ${taskKey}`,
-					extensionVersion: "0.4.15",
+					extensionVersion: "0.4.16",
 					manifestSchemaVersion: 2,
 					idempotencyKey: `start:${sessionId}:${startNonce}`,
 					baseRefOverrides,
@@ -1510,7 +1510,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					organizationId: c.orgId,
 					projectId: started.project_id,
 					minimumRevision: projectSync?.acceptedRevision ?? 0,
-					extensionVersion: "0.4.15",
+					extensionVersion: "0.4.16",
 				});
 				const capabilityExpansion = capabilityExpansionRequired(
 					projectSync?.capabilityEnvelope ?? null,

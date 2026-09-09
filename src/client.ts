@@ -354,7 +354,7 @@ export class TakonautClient {
 		private cfg: Pick<TakonautConfig, "serverUrl" | "apiKey" | "orgId">,
 	) {
 		this.client = new Client(
-			{ name: "tako-bridge", version: "0.4.15" },
+			{ name: "tako-bridge", version: "0.4.16" },
 			{ capabilities: {} },
 		);
 	}
