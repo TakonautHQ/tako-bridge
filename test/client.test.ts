@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// The SDK client is mocked at the transport boundary so catalog discovery stays deterministic.
 const mocks = vi.hoisted(() => ({
 	connect: vi.fn(),
+	listTools: vi.fn(),
 	callTool: vi.fn(),
 	close: vi.fn(),
 	streamableTransport: vi.fn(),
@@ -10,6 +12,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
 	Client: class {
 		connect = mocks.connect;
+		listTools = mocks.listTools;
 		callTool = mocks.callTool;
 		close = mocks.close;
 	},
@@ -40,9 +43,90 @@ const cfg = {
 describe("TakonautClient transport", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
+		mocks.listTools.mockResolvedValue({ tools: [] });
 		mocks.callTool.mockResolvedValue({
 			content: [{ type: "text", text: JSON.stringify({ tasks: [] }) }],
 		});
+	});
+
+	it("discovers the caller-filtered MCP catalog over the authenticated connection", async () => {
+		mocks.listTools.mockResolvedValue({
+			tools: [
+				{
+					name: "list_tasks",
+					description: "List tasks the connected user may view.",
+					inputSchema: {
+						type: "object",
+						properties: { project_key: { type: "string" } },
+						additionalProperties: false,
+					},
+				},
+			],
+		});
+		const client = new TakonautClient(cfg);
+
+		await expect(client.listTools()).resolves.toEqual([
+			{
+				name: "list_tasks",
+				description: "List tasks the connected user may view.",
+				inputSchema: {
+					type: "object",
+					properties: { project_key: { type: "string" } },
+					additionalProperties: false,
+				},
+			},
+		]);
+		expect(mocks.listTools).toHaveBeenCalledOnce();
+		expect(mocks.connect).toHaveBeenCalledOnce();
+	});
+
+	it("calls a discovered MCP tool generically and enforces the argument bound", async () => {
+		mocks.callTool.mockResolvedValue({
+			content: [{ type: "text", text: JSON.stringify({ tasks: ["PAY-1"] }) }],
+		});
+		const client = new TakonautClient(cfg);
+
+		await expect(
+			client.callTool("list_tasks", { project_key: "PAY" }),
+		).resolves.toEqual({ tasks: ["PAY-1"] });
+		expect(mocks.callTool).toHaveBeenCalledWith({
+			name: "list_tasks",
+			arguments: { project_key: "PAY" },
+		});
+
+		await expect(
+			client.callTool("list_tasks", { query: "x".repeat(8_192) }),
+		).rejects.toThrow("8 KB");
+		expect(mocks.callTool).toHaveBeenCalledTimes(1);
+	});
+
+	it("preserves successful plain-text MCP tool results", async () => {
+		mocks.callTool.mockResolvedValue({
+			content: [{ type: "text", text: "Standup summary: all submitted." }],
+		});
+		const client = new TakonautClient(cfg);
+
+		await expect(client.callTool("get_standup_summary", {})).resolves.toBe(
+			"Standup summary: all submitted.",
+		);
+	});
+
+	it("bounds generic MCP output by UTF-8 bytes", async () => {
+		mocks.callTool.mockResolvedValue({
+			content: [
+				{ type: "text", text: JSON.stringify({ value: "🐙".repeat(4_000) }) },
+			],
+		});
+		const client = new TakonautClient(cfg);
+
+		const result = (await client.callTool("get_task", {
+			task_key: "PAY-1",
+		})) as { truncated: boolean; preview: string };
+
+		expect(result.truncated).toBe(true);
+		expect(Buffer.byteLength(result.preview, "utf8")).toBeLessThanOrEqual(
+			8 * 1024,
+		);
 	});
 
 	it("connects with Streamable HTTP and both personal-key headers", async () => {
@@ -61,6 +145,38 @@ describe("TakonautClient transport", () => {
 			"X-Organization-Id": "org-123",
 		});
 		expect(mocks.connect).toHaveBeenCalledOnce();
+	});
+
+	it("passes bounded transport timeouts for synchronization calls", async () => {
+		const client = new TakonautClient(cfg);
+
+		await Reflect.apply(client.listStartableTasks, client, ["", 10_000]);
+		await Reflect.apply(client.getAgenticDeliveryStatus, client, [
+			"pi-session-1",
+			"run-1",
+			10_000,
+		]);
+		await Reflect.apply(client.reportAgentTelemetry, client, [
+			{
+				runId: "run-1",
+				sessionId: "pi-session-1",
+				sequence: 1,
+				observedAt: "2030-01-01T00:00:00.000Z",
+				instances: [],
+			},
+			10_000,
+		]);
+
+		expect(
+			mocks.callTool.mock.calls.map(([, resultSchema, options]) => ({
+				resultSchema,
+				options,
+			})),
+		).toEqual([
+			{ resultSchema: undefined, options: { timeout: 10_000 } },
+			{ resultSchema: undefined, options: { timeout: 10_000 } },
+			{ resultSchema: undefined, options: { timeout: 10_000 } },
+		]);
 	});
 
 	it("parses successful MCP responses larger than 2,000 characters", async () => {
@@ -91,6 +207,66 @@ describe("TakonautClient transport", () => {
 		await expect(client.listStartableTasks()).rejects.toThrow("requires HTTPS");
 		expect(mocks.streamableTransport).not.toHaveBeenCalled();
 		expect(mocks.connect).not.toHaveBeenCalled();
+	});
+
+	it("deduplicates concurrent connection attempts", async () => {
+		let finishConnect: (() => void) | undefined;
+		mocks.connect.mockImplementationOnce(
+			() =>
+				new Promise<void>((resolve) => {
+					finishConnect = resolve;
+				}),
+		);
+		const client = new TakonautClient(cfg);
+
+		const search = client.searchCapabilities("my leave");
+		const read = client.readCapability("leave.list_own", {});
+		await vi.waitFor(() => expect(mocks.connect).toHaveBeenCalledOnce());
+		finishConnect?.();
+		await Promise.all([search, read]);
+
+		expect(mocks.streamableTransport).toHaveBeenCalledOnce();
+		expect(mocks.connect).toHaveBeenCalledOnce();
+	});
+
+	it("routes only bounded gateway calls for discovery, reads, and actions", async () => {
+		const client = new TakonautClient(cfg);
+		await client.searchCapabilities("my leave");
+		await client.readCapability("leave.list_own", { start_date: "2032-01-01" });
+		await client.prepareAction("leave.create", { start_date: "2032-01-02" });
+		await client.executeAction("token", "leave.create", {
+			start_date: "2032-01-02",
+		});
+
+		expect(mocks.callTool.mock.calls.map(([request]) => request)).toEqual([
+			{
+				name: "bridge_search_capabilities",
+				arguments: { query: "my leave" },
+			},
+			{
+				name: "bridge_read_capability",
+				arguments: {
+					capability_id: "leave.list_own",
+					arguments: { start_date: "2032-01-01" },
+				},
+			},
+			{
+				name: "bridge_prepare_action",
+				arguments: {
+					capability_id: "leave.create",
+					arguments: { start_date: "2032-01-02" },
+				},
+			},
+			{
+				name: "bridge_execute_action",
+				arguments: {
+					action_token: "token",
+					capability_id: "leave.create",
+					arguments: { start_date: "2032-01-02" },
+					confirmed: true,
+				},
+			},
+		]);
 	});
 
 	it("reuses one connection and closes it on shutdown", async () => {

@@ -18,13 +18,16 @@ Tako Bridge refuses to start work when repository identity, GitHub access, Git i
 
 ## Install
 
-Install a pinned Git tag so updates are deliberate:
+Install a pinned Git tag from the project you are working in. Project-local installation is recommended so Tako Bridge commands and policy hooks load only in that project:
 
 ```bash
-pi install git:github.com/TakonautHQ/tako-bridge@v0.4.6
+cd /path/to/your/project
+pi install git:github.com/TakonautHQ/tako-bridge@v0.4.16 -l
 ```
 
-Start Pi, then run:
+Pi records the package in `.pi/settings.json` and installs it after the project is trusted. To intentionally load Tako Bridge in every Pi project, omit `-l`. If an older release is already installed globally, use `pi list`, remove the exact global source shown there with `pi remove SOURCE`, and then install it locally.
+
+Start Pi in that project, then run:
 
 ```text
 /tako-setup
@@ -79,16 +82,33 @@ Human decisions remain in Takonaut's Review queue. Approval completes the govern
 | Command | Effect |
 | --- | --- |
 | `/tako-setup` | Review and install missing pinned Pi companion packages, then reload resources. |
-| `/tako-login [api-base-url]` | Connect through device authorization. HTTPS is required except for explicit loopback development. |
+| `/tako-login [api-base-url]` | Connect through device authorization, verify the caller-filtered MCP catalog, and replace an exact legacy project-local Takonaut MCP entry. HTTPS is required except for explicit loopback development. |
+| `/tako-logout` | Disconnect, disable every Bridge-managed MCP tool, and remove only the active organization's stored credential while preserving other organization profiles. |
 | `/tako-status` | Reconcile this Pi session with the durable Agentic Delivery run. |
 | `/tako-reconnect` | Explicitly authorize a replacement personal Pi key for retained state. |
-| `/tako-tasks` | List every assigned work item, including readiness and reasons blocked items cannot start. |
+| `/tako-tasks` | Search current assigned work by key, title, Project, Sprint, or Stage, then open the selected item in Takonaut. Sprint Projects show the active Sprint; Kanban Projects show pulled, unarchived board work. |
 | `/tako-panel` | Configure the persistent Tako Bridge panel above Pi's prompt editor. |
 | `/tako-standup` | Draft a Standup from the current Pi session and bounded Git activity, then open the reviewed draft in Takonaut. |
 
+### Authorized Takonaut MCP tools
+
+After authentication, Bridge discovers Takonaut's caller-filtered MCP catalog and registers each reviewed public tool in Pi as `tako_mcp_<server_tool_name>`, for example `tako_mcp_list_tasks` or `tako_mcp_create_task`. The active set follows the selected organization, live membership, feature flags, current RBAC grants, and the personal key's permission ceiling. Those checks run again on every call; discovery is never treated as authorization. Re-authentication replaces the active Takonaut tool set, disables stale tools, and preserves tools owned by Pi or other integrations.
+
+Direct `tako_mcp_*` mutations execute immediately after server authorization, without an additional Bridge confirmation prompt. Use the stable governed gateway when you want preview-and-confirm behavior:
+
+- `tako_search_capabilities` returns at most five authorized self-service capabilities.
+- `tako_read` runs one bounded read.
+- `tako_action` prepares a supported mutation, shows a redacted preview and argument digest, and executes only after local confirmation.
+
+Public MCP tools are deny-by-default. Platform/operator functions, organization administration, approvals, Standup submission, unreviewed legacy handlers, outbound web search, and internal Bridge protocol tools are not registered for the model. Project- and record-scoped tools repeat target-resource and ownership checks in the handler. Generic arguments and returned previews are bounded to 8 KB.
+
+On successful `/tako-login`, Bridge also removes `mcpServers.takonaut` from the current project's `.mcp.json` only when it is an exact HTTPS Takonaut personal-key entry. It never copies the new Bridge credential into that file, never removes unrelated MCP servers, and refuses unsafe or nonmatching files. Other saved Takonaut organization profiles remain available for organization switching.
+
+Creating a Task through the governed `tako_action` path still requires `tasks.create` on the selected Project and an active Sprint; Kanban Projects and Projects without an active Sprint are refused. Personal MCP-created Tasks default to the authenticated member as owner and retain the selected Stage's Track so later Stage moves resolve against the configured Delivery flow. Prepared actions expire after five minutes, are bound to the exact user, organization, device key, capability, and arguments, and are replay-safe across server workers.
+
 ### Pi status panel and Standup draft
 
-In interactive Pi sessions, Tako Bridge shows a compact panel above the prompt editor with connection state, the active run, assigned/ready/blocked counts, task eligibility, and the selected Project's Standup status. The panel refreshes every 30 seconds by default. Use `/tako-panel` to show or hide sections, choose the number of task rows, change the refresh interval, and select the Project whose Standup status is tracked. Preferences are stored in the non-secret `~/.takonaut/bridge.json` file.
+In interactive Pi sessions, Tako Bridge shows a compact panel above the prompt editor with connection state, the active run, ready/blocked totals, configured Stage-name counts, current task rows, and the selected Project's Standup status. Use `/tako-panel` to show or hide sections, set the task-row limit to 1, 3, 5, or 10, change the refresh interval, select the Standup Project, or enable the optional Debug block. Debug shows safe panel-refresh, telemetry, and reconciliation timing/status details without credentials or payload contents. Preferences are stored in the non-secret `~/.takonaut/bridge.json` file.
 
 `/tako-standup` asks before sending the current Pi conversation and bounded Git log/status summaries to the developer's configured Pi model. The generated sections open in an editor for review. Only after a second confirmation does Bridge upload the reviewed draft to Takonaut for 15 minutes and open the authenticated Standup form in the system browser. It never submits the Standup automatically.
 

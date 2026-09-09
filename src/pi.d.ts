@@ -50,6 +50,8 @@ declare module "@earendil-works/pi-coding-agent" {
 	}
 
 	export interface ExtensionAPI {
+		getActiveTools(): string[];
+		setActiveTools(names: string[]): void;
 		on(
 			event: "tool_call",
 			handler: (

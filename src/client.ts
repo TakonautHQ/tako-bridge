@@ -9,13 +9,31 @@ import type { AgenticWorkspaceCompletionEvidence } from "./git";
 import type { CapabilityEnvelope, SignedAgenticManifest } from "./manifest";
 import { bridgeServerUrl } from "./server-url.js";
 
-function parseToolJson(result: any): any {
-	const text = String(
+const GENERIC_TOOL_IO_LIMIT_BYTES = 8 * 1024;
+const CATALOG_SCHEMA_LIMIT_BYTES = 32 * 1024;
+const CATALOG_DESCRIPTION_LIMIT = 2_000;
+const CATALOG_TOOL_NAME = /^[a-zA-Z][a-zA-Z0-9_-]{0,127}$/;
+
+function byteLength(value: string): number {
+	return Buffer.byteLength(value, "utf8");
+}
+
+function toolText(result: any): string {
+	return String(
 		result?.content?.find?.((c: any) => c.type === "text")?.text ?? "",
 	);
+}
+
+function ensureToolSuccess(result: any): string {
+	const text = toolText(result);
 	if (result?.isError === true) {
 		throw new Error(text.slice(0, 2_000) || "Takonaut tool request failed.");
 	}
+	return text;
+}
+
+function parseToolJson(result: any): any {
+	const text = ensureToolSuccess(result);
 	try {
 		return JSON.parse(text || "{}");
 	} catch {
@@ -23,10 +41,68 @@ function parseToolJson(result: any): any {
 	}
 }
 
+function parseGenericToolResult(result: any): unknown {
+	const text = ensureToolSuccess(result);
+	try {
+		return JSON.parse(text || "{}");
+	} catch {
+		return text;
+	}
+}
+
+function boundedUtf8(value: string, maxBytes: number): string {
+	let bounded = value.slice(0, maxBytes);
+	while (byteLength(bounded) > maxBytes) bounded = bounded.slice(0, -1);
+	return bounded;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+export interface TakonautMcpTool {
+	name: string;
+	description: string;
+	inputSchema: Record<string, unknown>;
+}
+
+function parseCatalogTool(value: unknown): TakonautMcpTool {
+	if (!isRecord(value) || !CATALOG_TOOL_NAME.test(String(value.name ?? ""))) {
+		throw new Error("Takonaut returned an invalid MCP tool name.");
+	}
+	if (!isRecord(value.inputSchema)) {
+		throw new Error("Takonaut returned an invalid MCP tool schema.");
+	}
+	let schemaJson: string;
+	let inputSchema: Record<string, unknown>;
+	try {
+		schemaJson = JSON.stringify(value.inputSchema);
+		inputSchema = JSON.parse(schemaJson) as Record<string, unknown>;
+	} catch {
+		throw new Error("Takonaut returned an invalid MCP tool schema.");
+	}
+	if (byteLength(schemaJson) > CATALOG_SCHEMA_LIMIT_BYTES) {
+		throw new Error("Takonaut returned an MCP tool schema larger than 32 KB.");
+	}
+	return {
+		name: String(value.name),
+		description: String(value.description ?? "").slice(
+			0,
+			CATALOG_DESCRIPTION_LIMIT,
+		),
+		inputSchema,
+	};
+}
+
 export interface StartableTask {
 	task_key: string;
 	task_title: string;
 	project_key: string;
+	task_path?: string;
+	workflow_mode?: "sprint" | "kanban";
+	sprint_name?: string | null;
+	stage_name?: string;
+	stage_group?: string;
 	startability: { startable: boolean; reasons: string[] };
 }
 
@@ -242,43 +318,178 @@ export interface AgentTelemetrySnapshot {
 	instances: AgentTelemetryInstance[];
 }
 
+export interface PersonalCapabilitySummary {
+	id: string;
+	title: string;
+	summary: string;
+	mode: "read" | "mutation";
+}
+
+export interface PersonalCapabilitySearchResult {
+	capabilities: PersonalCapabilitySummary[];
+	count: number;
+}
+
+export interface PreparedPersonalAction {
+	action_token: string;
+	capability_id: string;
+	arguments_digest: string;
+	preview: Record<string, unknown>;
+	expires_at: string;
+}
+
+export interface ExecutedPersonalAction {
+	status: "executed";
+	capability_id: string;
+	result: Record<string, unknown>;
+	idempotent_replay: boolean;
+}
+
 export class TakonautClient {
 	private client: Client;
 	private connected = false;
+	private connectPromise: Promise<void> | undefined;
 
-	constructor(private cfg: TakonautConfig) {
+	constructor(
+		private cfg: Pick<TakonautConfig, "serverUrl" | "apiKey" | "orgId">,
+	) {
 		this.client = new Client(
-			{ name: "tako-bridge", version: "0.4.6" },
+			{ name: "tako-bridge", version: "0.4.16" },
 			{ capabilities: {} },
 		);
 	}
 
 	private async ensure(): Promise<void> {
 		if (this.connected) return;
-		const endpoint = bridgeServerUrl(this.cfg.serverUrl, "Takonaut MCP URL");
-		const transport = new StreamableHTTPClientTransport(endpoint, {
-			requestInit: {
-				redirect: "error",
-				headers: {
-					"X-API-Key": this.cfg.apiKey,
-					"X-Organization-Id": this.cfg.orgId,
-				},
-			},
-		});
-		await this.client.connect(transport);
-		this.connected = true;
+		if (!this.connectPromise) {
+			this.connectPromise = (async () => {
+				const endpoint = bridgeServerUrl(
+					this.cfg.serverUrl,
+					"Takonaut MCP URL",
+				);
+				const transport = new StreamableHTTPClientTransport(endpoint, {
+					requestInit: {
+						redirect: "error",
+						headers: {
+							"X-API-Key": this.cfg.apiKey,
+							"X-Organization-Id": this.cfg.orgId,
+						},
+					},
+				});
+				await this.client.connect(transport);
+				this.connected = true;
+			})().finally(() => {
+				this.connectPromise = undefined;
+			});
+		}
+		await this.connectPromise;
+	}
+
+	private async requestTool(
+		name: string,
+		args: Record<string, unknown>,
+		timeoutMs?: number,
+	): Promise<any> {
+		await this.ensure();
+		const request = { name, arguments: args };
+		return timeoutMs === undefined
+			? this.client.callTool(request)
+			: this.client.callTool(request, undefined, { timeout: timeoutMs });
 	}
 
 	private async call(
 		name: string,
 		args: Record<string, unknown>,
+		timeoutMs?: number,
 	): Promise<any> {
-		await this.ensure();
-		return parseToolJson(await this.client.callTool({ name, arguments: args }));
+		return parseToolJson(await this.requestTool(name, args, timeoutMs));
 	}
 
-	listStartableTasks(projectKey = ""): Promise<{ tasks: StartableTask[] }> {
-		return this.call("list_startable_tasks", { project_key: projectKey });
+	async listTools(): Promise<TakonautMcpTool[]> {
+		await this.ensure();
+		const result = await this.client.listTools();
+		const tools = Array.isArray(result?.tools) ? result.tools : [];
+		const parsed = tools.map(parseCatalogTool);
+		if (new Set(parsed.map((tool) => tool.name)).size !== parsed.length) {
+			throw new Error("Takonaut returned duplicate MCP tool names.");
+		}
+		return parsed;
+	}
+
+	async callTool(
+		name: string,
+		args: Record<string, unknown>,
+	): Promise<unknown> {
+		if (!CATALOG_TOOL_NAME.test(name)) {
+			throw new Error("Invalid Takonaut MCP tool name.");
+		}
+		const argumentsJson = JSON.stringify(args);
+		if (byteLength(argumentsJson) > GENERIC_TOOL_IO_LIMIT_BYTES) {
+			throw new Error("Takonaut MCP tool arguments exceed the 8 KB limit.");
+		}
+		const result = parseGenericToolResult(await this.requestTool(name, args));
+		const resultJson = JSON.stringify(result);
+		if (byteLength(resultJson) > GENERIC_TOOL_IO_LIMIT_BYTES) {
+			return {
+				truncated: true,
+				preview: boundedUtf8(resultJson, GENERIC_TOOL_IO_LIMIT_BYTES),
+			};
+		}
+		return result;
+	}
+
+	listStartableTasks(
+		projectKey = "",
+		timeoutMs?: number,
+	): Promise<{ tasks: StartableTask[] }> {
+		return this.call(
+			"list_startable_tasks",
+			{ project_key: projectKey },
+			timeoutMs,
+		);
+	}
+
+	searchCapabilities(query: string): Promise<PersonalCapabilitySearchResult> {
+		return this.call("bridge_search_capabilities", { query }, 10_000);
+	}
+
+	readCapability(
+		capabilityId: string,
+		args: Record<string, unknown>,
+	): Promise<Record<string, unknown>> {
+		return this.call(
+			"bridge_read_capability",
+			{ capability_id: capabilityId, arguments: args },
+			10_000,
+		);
+	}
+
+	prepareAction(
+		capabilityId: string,
+		args: Record<string, unknown>,
+	): Promise<PreparedPersonalAction> {
+		return this.call(
+			"bridge_prepare_action",
+			{ capability_id: capabilityId, arguments: args },
+			10_000,
+		);
+	}
+
+	executeAction(
+		actionToken: string,
+		capabilityId: string,
+		args: Record<string, unknown>,
+	): Promise<ExecutedPersonalAction> {
+		return this.call(
+			"bridge_execute_action",
+			{
+				action_token: actionToken,
+				capability_id: capabilityId,
+				arguments: args,
+				confirmed: true,
+			},
+			10_000,
+		);
 	}
 
 	getBridgeStandupStatus(projectKey: string): Promise<{
@@ -341,11 +552,19 @@ export class TakonautClient {
 		});
 	}
 
-	getAgenticDeliveryStatus(sessionId: string, runId = ""): Promise<any> {
-		return this.call("get_agentic_delivery_status", {
-			session_id: sessionId,
-			run_id: runId,
-		});
+	getAgenticDeliveryStatus(
+		sessionId: string,
+		runId = "",
+		timeoutMs?: number,
+	): Promise<any> {
+		return this.call(
+			"get_agentic_delivery_status",
+			{
+				session_id: sessionId,
+				run_id: runId,
+			},
+			timeoutMs,
+		);
 	}
 
 	reauthorizeAgenticDeliverySession(input: {
@@ -751,25 +970,35 @@ export class TakonautClient {
 		});
 	}
 
-	reportAgentTelemetry(snapshot: AgentTelemetrySnapshot): Promise<any> {
-		return this.call("report_agentic_delivery_telemetry", {
-			run_id: snapshot.runId,
-			session_id: snapshot.sessionId,
-			sequence: snapshot.sequence,
-			observed_at: snapshot.observedAt,
-			instances: snapshot.instances.map((instance) => ({
-				instance_key: instance.instanceKey,
-				parent_instance_key: instance.parentInstanceKey,
-				label: instance.label,
-				role: instance.role,
-				reported_status: instance.reportedStatus,
-				started_at: instance.startedAt,
-				last_activity_at: instance.lastActivityAt,
-			})),
-		});
+	reportAgentTelemetry(
+		snapshot: AgentTelemetrySnapshot,
+		timeoutMs?: number,
+	): Promise<any> {
+		return this.call(
+			"report_agentic_delivery_telemetry",
+			{
+				run_id: snapshot.runId,
+				session_id: snapshot.sessionId,
+				sequence: snapshot.sequence,
+				observed_at: snapshot.observedAt,
+				instances: snapshot.instances.map((instance) => ({
+					instance_key: instance.instanceKey,
+					parent_instance_key: instance.parentInstanceKey,
+					label: instance.label,
+					role: instance.role,
+					reported_status: instance.reportedStatus,
+					started_at: instance.startedAt,
+					last_activity_at: instance.lastActivityAt,
+				})),
+			},
+			timeoutMs,
+		);
 	}
 
 	async close(): Promise<void> {
+		if (this.connectPromise) {
+			await this.connectPromise.catch(() => undefined);
+		}
 		if (this.connected) {
 			try {
 				await this.client.close();

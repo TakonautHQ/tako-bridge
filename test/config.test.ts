@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+	clearActiveCredential,
 	credentialsPathForConfig,
 	loadConfigFromFiles,
 	projectRepoMappingKey,
@@ -59,6 +60,53 @@ describe("secure Bridge profiles", () => {
 		expect(statSync(credentialsPath).mode & 0o777).toBe(0o600);
 	});
 
+	it("restores the bridge file when credential persistence fails", () => {
+		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+		const original = '{"version":2,"repoRoot":"/work/original"}\n';
+		writeFileSync(path, original, { mode: 0o600 });
+		const blockedParent = join(dir, "not-a-directory");
+		writeFileSync(blockedParent, "blocked", { mode: 0o600 });
+
+		expect(() =>
+			saveConfig(CREDS, path, join(blockedParent, "credentials.json")),
+		).toThrow();
+		expect(readFileSync(path, "utf-8")).toBe(original);
+	});
+
+	it("restores both v1 files when migration fails after writing credentials", () => {
+		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+		const legacy = JSON.stringify({
+			version: 1,
+			serverUrl: "https://legacy.test/mcp/",
+			apiKey: "legacy-secret",
+			orgId: "org-legacy",
+		});
+		const previousCredentials = JSON.stringify({
+			version: 2,
+			activeOrgId: "org-existing",
+			profiles: { "org-existing": CREDS },
+		});
+		writeFileSync(path, legacy, { mode: 0o600 });
+		writeFileSync(credentialsPath, previousCredentials, { mode: 0o600 });
+		mkdirSync(`${credentialsPath}.v1-backup`, { mode: 0o700 });
+
+		expect(() => saveConfig(CREDS, path, credentialsPath)).toThrow();
+		expect(readFileSync(path, "utf-8")).toBe(legacy);
+		expect(readFileSync(credentialsPath, "utf-8")).toBe(previousCredentials);
+	});
+
+	it("repairs an existing owner-readable Bridge config before panel access", () => {
+		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+		writeFileSync(
+			path,
+			JSON.stringify({ version: 2, panel: { visible: false } }),
+			{ mode: 0o644 },
+		);
+
+		expect(bridgeConfig.loadPanelSettings(path).visible).toBe(false);
+		expect(statSync(path).mode & 0o777).toBe(0o600);
+	});
+
 	it("refuses to persist a personal key for an insecure server", () => {
 		expect(() =>
 			saveConfig({ ...CREDS, serverUrl: "http://takonaut.test/mcp/" }, path),
@@ -101,34 +149,53 @@ describe("secure Bridge profiles", () => {
 		expect(credentials.profiles["org-1"].apiKey).toBe("key-new");
 	});
 
+	it("logs out only the active organization profile", () => {
+		saveConfig(CREDS, path);
+		saveConfig(
+			{
+				serverUrl: "https://y.test/mcp/",
+				apiKey: "key-two",
+				orgId: "org-2",
+			},
+			path,
+		);
+
+		expect(clearActiveCredential(path)).toBe(true);
+		expect(loadConfigFromFiles(path, credentialsPath)).toBeNull();
+		const credentials = JSON.parse(readFileSync(credentialsPath, "utf-8"));
+		expect(credentials.activeOrgId).toBe("");
+		expect(credentials.profiles).toEqual({ "org-1": CREDS });
+	});
+
 	it("persists bounded panel preferences in the non-secret Bridge file", () => {
 		expect(bridgeConfig.loadPanelSettings(path)).toEqual({
 			visible: true,
 			showRun: true,
 			showTasks: true,
 			showStandup: true,
+			debug: false,
 			taskLimit: 3,
 			refreshSeconds: 30,
 		});
 
-		bridgeConfig.savePanelSettings(
-			{
-				visible: false,
-				showRun: false,
-				showTasks: true,
-				showStandup: true,
-				taskLimit: 5,
-				refreshSeconds: 60,
-				standupProjectKey: "PAY",
-			},
-			path,
-		);
+		const panelSettings = {
+			visible: false,
+			showRun: false,
+			showTasks: true,
+			showStandup: true,
+			debug: true,
+			taskLimit: 5 as const,
+			refreshSeconds: 60 as const,
+			standupProjectKey: "PAY",
+		};
+		bridgeConfig.savePanelSettings(panelSettings, path);
 
 		expect(bridgeConfig.loadPanelSettings(path)).toEqual({
 			visible: false,
 			showRun: false,
 			showTasks: true,
 			showStandup: true,
+			debug: true,
 			taskLimit: 5,
 			refreshSeconds: 60,
 			standupProjectKey: "PAY",
@@ -140,6 +207,7 @@ describe("secure Bridge profiles", () => {
 				showRun: false,
 				showTasks: true,
 				showStandup: true,
+				debug: true,
 				taskLimit: 5,
 				refreshSeconds: 60,
 				standupProjectKey: "PAY",
@@ -283,6 +351,24 @@ describe("secure Bridge profiles", () => {
 		expect(() =>
 			readFileSync(join(dirname(projectConfig), "credentials.json"), "utf-8"),
 		).toThrow();
+	});
+
+	it("repairs permissions before migrating a v1 flat credential file", () => {
+		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+		writeFileSync(
+			path,
+			JSON.stringify({
+				serverUrl: CREDS.serverUrl,
+				apiKey: CREDS.apiKey,
+				orgId: CREDS.orgId,
+			}),
+			{ mode: 0o644 },
+		);
+
+		const loaded = loadConfigFromFiles(path, credentialsPath);
+		expect(loaded?.apiKey).toBe("key-new");
+		expect(statSync(path).mode & 0o777).toBe(0o600);
+		expect(statSync(credentialsPath).mode & 0o777).toBe(0o600);
 	});
 
 	it("migrates a secure v1 flat file without losing settings or credentials", () => {

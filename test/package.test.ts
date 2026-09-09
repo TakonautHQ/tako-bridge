@@ -150,9 +150,11 @@ describe("Pi package manifest", () => {
 		expect(pkg.pi?.extensions).toEqual(["./src/index.ts"]);
 		expect(pkg.bin).toBeUndefined();
 		expect(pkg.peerDependencies?.["@earendil-works/pi-coding-agent"]).toBe("*");
+		expect(pkg.peerDependencies?.["@earendil-works/pi-tui"]).toBe("*");
 		expect(pkg.devDependencies?.["@earendil-works/pi-coding-agent"]).toBe(
 			"0.84.0",
 		);
+		expect(pkg.devDependencies?.["@earendil-works/pi-tui"]).toBe("0.84.1");
 		for (const name of [
 			"@earendil-works/pi-agent-core",
 			"@earendil-works/pi-ai",
@@ -161,6 +163,16 @@ describe("Pi package manifest", () => {
 		]) {
 			expect(pkg.dependencies?.[name]).toBeUndefined();
 		}
+	});
+
+	it("recommends a pinned project-local installation", () => {
+		const version = readPackage().version;
+		const readme = readFileSync(join(packageRoot, "README.md"), "utf-8");
+
+		expect(readme).toContain(
+			`pi install git:github.com/TakonautHQ/tako-bridge@v${version} -l`,
+		);
+		expect(readme).toContain("project you are working in");
 	});
 
 	it("uses the package version for runtime identity and manifest negotiation", () => {
@@ -188,21 +200,17 @@ describe("Pi package manifest", () => {
 		expect(existsSync(join(extractedPackage, "test"))).toBe(false);
 	}, 30_000);
 
-	it(
-		"installs packed production dependencies with npm",
-		() => {
-			const home = mkdtempSync(join(tmpdir(), "tako-bridge-npm-install-"));
-			tempHomes.push(home);
-			const extractedPackage = packPackage(home);
-			execFileSync("npm", ["install", "--omit=dev"], {
-				cwd: extractedPackage,
-				stdio: "pipe",
-				timeout: 30_000,
-			});
-			expect(existsSync(join(extractedPackage, "node_modules"))).toBe(true);
-		},
-		90_000,
-	);
+	it("installs packed production dependencies with npm", () => {
+		const home = mkdtempSync(join(tmpdir(), "tako-bridge-npm-install-"));
+		tempHomes.push(home);
+		const extractedPackage = packPackage(home);
+		execFileSync("npm", ["install", "--omit=dev"], {
+			cwd: extractedPackage,
+			stdio: "pipe",
+			timeout: 30_000,
+		});
+		expect(existsSync(join(extractedPackage, "node_modules"))).toBe(true);
+	}, 90_000);
 
 	it("autoloads Tako commands from a packed, isolated installation", async () => {
 		const home = mkdtempSync(join(tmpdir(), "tako-pi-home-"));

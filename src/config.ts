@@ -1,8 +1,8 @@
 // Secure, organization-profiled Takonaut connection and repository configuration.
 //
 // Non-secret repository settings live in bridge.json. Bearer credentials live in
-// an owner-only credentials.json beside it. Legacy flat files are migrated only
-// when their existing ownership/mode is already safe.
+// an owner-only credentials.json beside it. Existing owned, regular bridge.json
+// files are tightened to mode 0600 before access or legacy credential migration.
 
 import {
 	chmodSync,
@@ -31,6 +31,7 @@ export interface PanelSettings {
 	showRun: boolean;
 	showTasks: boolean;
 	showStandup: boolean;
+	debug: boolean;
 	taskLimit: 1 | 3 | 5 | 10;
 	refreshSeconds: 0 | 15 | 30 | 60;
 	standupProjectKey?: string;
@@ -41,6 +42,7 @@ export const DEFAULT_PANEL_SETTINGS: PanelSettings = {
 	showRun: true,
 	showTasks: true,
 	showStandup: true,
+	debug: false,
 	taskLimit: 3,
 	refreshSeconds: 30,
 };
@@ -118,6 +120,7 @@ function normalizedPanelSettings(
 		showRun: value?.showRun ?? DEFAULT_PANEL_SETTINGS.showRun,
 		showTasks: value?.showTasks ?? DEFAULT_PANEL_SETTINGS.showTasks,
 		showStandup: value?.showStandup ?? DEFAULT_PANEL_SETTINGS.showStandup,
+		debug: value?.debug ?? DEFAULT_PANEL_SETTINGS.debug,
 		taskLimit,
 		refreshSeconds,
 		...(standupProjectKey ? { standupProjectKey } : {}),
@@ -127,14 +130,14 @@ function normalizedPanelSettings(
 export function loadPanelSettings(
 	path: string = BRIDGE_CONFIG_PATH,
 ): PanelSettings {
-	return normalizedPanelSettings(readJson<BridgeFile>(path, "Bridge config")?.panel);
+	return normalizedPanelSettings(readBridgeJson(path)?.panel);
 }
 
 export function savePanelSettings(
 	settings: PanelSettings,
 	path: string = BRIDGE_CONFIG_PATH,
 ): void {
-	const current = readJson<BridgeFile>(path, "Bridge config") ?? {};
+	const current = readBridgeJson(path) ?? {};
 	writeJson(
 		path,
 		sanitizedBridge({
@@ -196,6 +199,19 @@ function readJson<T>(path: string, label: string, secret = false): T | null {
 	}
 }
 
+function readBridgeJson(path: string): BridgeFile | null {
+	if (!existsSync(path)) return null;
+	assertSecureDirectory(dirname(path));
+	const info = lstatSync(path);
+	if (info.isSymbolicLink() || !info.isFile()) {
+		throw new Error(`Bridge config path must be a regular file: ${path}`);
+	}
+	assertOwned(path, "Bridge config file");
+	if ((info.mode & 0o077) !== 0) chmodSync(path, 0o600);
+	assertSecureFile(path);
+	return readJson<BridgeFile>(path, "Bridge config");
+}
+
 function writeJson(path: string, value: unknown, secret: boolean): void {
 	const parent = dirname(path);
 	mkdirSync(parent, { recursive: true, mode: 0o700 });
@@ -213,6 +229,40 @@ function writeJson(path: string, value: unknown, secret: boolean): void {
 		chmodSync(tmp, secret ? 0o600 : 0o600);
 		renameSync(tmp, path);
 		chmodSync(path, secret ? 0o600 : 0o600);
+	} finally {
+		rmSync(tmp, { force: true });
+	}
+}
+
+type FileSnapshot =
+	| { exists: false }
+	| { exists: true; content: string; mode: number };
+
+function snapshotFile(path: string): FileSnapshot {
+	if (!existsSync(path)) return { exists: false };
+	const info = lstatSync(path);
+	return {
+		exists: true,
+		content: readFileSync(path, "utf-8"),
+		mode: info.mode & 0o777,
+	};
+}
+
+function restoreFile(path: string, snapshot: FileSnapshot): void {
+	if (!snapshot.exists) {
+		if (existsSync(path)) rmSync(path, { force: true });
+		return;
+	}
+	const parent = dirname(path);
+	const tmp = join(
+		parent,
+		`.${basename(path)}.${process.pid}.${Date.now()}.rollback`,
+	);
+	try {
+		writeFileSync(tmp, snapshot.content, { mode: snapshot.mode });
+		chmodSync(tmp, snapshot.mode);
+		renameSync(tmp, path);
+		chmodSync(path, snapshot.mode);
 	} finally {
 		rmSync(tmp, { force: true });
 	}
@@ -295,9 +345,7 @@ function readFiles(
 	configPath: string,
 	credentialPath: string,
 ): { bridge: BridgeFile; credentials: CredentialFile | null } {
-	const rawBridge = readJson<BridgeFile>(configPath, "Bridge config") ?? {
-		version: 2,
-	};
+	const rawBridge = readBridgeJson(configPath) ?? { version: 2 };
 	return migrateV1(configPath, credentialPath, rawBridge);
 }
 
@@ -305,16 +353,73 @@ export function saveConfig(
 	partial: CredentialProfile,
 	path: string = BRIDGE_CONFIG_PATH,
 	credentialPath: string = credentialsPathForConfig(path),
-): void {
+): TakonautConfig {
 	bridgeServerUrl(partial.serverUrl, "Takonaut MCP URL");
-	const { bridge, credentials } = readFiles(path, credentialPath);
-	const updatedCredentials: CredentialFile = {
-		version: 2,
-		activeOrgId: partial.orgId,
-		profiles: { ...(credentials?.profiles ?? {}), [partial.orgId]: partial },
+	const rawBridge = readBridgeJson(path) ?? { version: 2 };
+	readJson<CredentialFile>(credentialPath, "Bridge credentials", true);
+	const bridgeSnapshot = snapshotFile(path);
+	const credentialSnapshot = snapshotFile(credentialPath);
+	let cleanBridge: BridgeFile;
+	try {
+		const { bridge, credentials } = migrateV1(path, credentialPath, rawBridge);
+		cleanBridge = sanitizedBridge(bridge);
+		const updatedCredentials: CredentialFile = {
+			version: 2,
+			activeOrgId: partial.orgId,
+			profiles: { ...(credentials?.profiles ?? {}), [partial.orgId]: partial },
+		};
+		writeJson(path, cleanBridge, false);
+		writeJson(credentialPath, updatedCredentials, true);
+	} catch (error) {
+		let rollbackError: unknown;
+		for (const [target, snapshot] of [
+			[credentialPath, credentialSnapshot],
+			[path, bridgeSnapshot],
+		] as const) {
+			try {
+				restoreFile(target, snapshot);
+			} catch (restoreError) {
+				rollbackError ??= restoreError;
+			}
+		}
+		if (rollbackError) {
+			throw new Error(
+				`Bridge configuration failed and rollback was incomplete: ${String(rollbackError)}`,
+				{ cause: error },
+			);
+		}
+		throw error;
+	}
+	return {
+		...partial,
+		credentialSource: "secure file",
+		configPath: path,
+		credentialPath,
+		repoRoot:
+			process.env.TAKONAUT_REPO_ROOT || cleanBridge.repoRoot || process.cwd(),
+		protectedBranches: cleanBridge.protectedBranches?.length
+			? cleanBridge.protectedBranches
+			: ["main", "master", "production", "release"],
+		projectRepos: cleanBridge.projectRepos ?? {},
 	};
-	writeJson(path, sanitizedBridge(bridge), false);
-	writeJson(credentialPath, updatedCredentials, true);
+}
+
+/** Remove only the active organization's credential and preserve other profiles. */
+export function clearActiveCredential(
+	path: string = BRIDGE_CONFIG_PATH,
+	credentialPath: string = credentialsPathForConfig(path),
+): boolean {
+	const { credentials } = readFiles(path, credentialPath);
+	if (!credentials?.activeOrgId) return false;
+	const profiles = { ...credentials.profiles };
+	if (!profiles[credentials.activeOrgId]) return false;
+	delete profiles[credentials.activeOrgId];
+	writeJson(
+		credentialPath,
+		{ version: 2, activeOrgId: "", profiles } satisfies CredentialFile,
+		true,
+	);
+	return true;
 }
 
 export function projectRepoMappingKey(
@@ -356,7 +461,7 @@ export function readProjectRepoMapping(
 	projectId: string,
 	path: string = BRIDGE_CONFIG_PATH,
 ): ProjectRepoMapping | null {
-	const bridge = readJson<BridgeFile>(path, "Bridge config") ?? {};
+	const bridge = readBridgeJson(path) ?? {};
 	return bridge.projectRepos?.[projectRepoMappingKey(orgId, projectId)] ?? null;
 }
 
