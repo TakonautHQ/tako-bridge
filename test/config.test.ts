@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+	clearActiveCredential,
 	credentialsPathForConfig,
 	loadConfigFromFiles,
 	projectRepoMappingKey,
@@ -57,6 +58,41 @@ describe("secure Bridge profiles", () => {
 			profiles: { "org-1": CREDS },
 		});
 		expect(statSync(credentialsPath).mode & 0o777).toBe(0o600);
+	});
+
+	it("restores the bridge file when credential persistence fails", () => {
+		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+		const original = '{"version":2,"repoRoot":"/work/original"}\n';
+		writeFileSync(path, original, { mode: 0o600 });
+		const blockedParent = join(dir, "not-a-directory");
+		writeFileSync(blockedParent, "blocked", { mode: 0o600 });
+
+		expect(() =>
+			saveConfig(CREDS, path, join(blockedParent, "credentials.json")),
+		).toThrow();
+		expect(readFileSync(path, "utf-8")).toBe(original);
+	});
+
+	it("restores both v1 files when migration fails after writing credentials", () => {
+		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+		const legacy = JSON.stringify({
+			version: 1,
+			serverUrl: "https://legacy.test/mcp/",
+			apiKey: "legacy-secret",
+			orgId: "org-legacy",
+		});
+		const previousCredentials = JSON.stringify({
+			version: 2,
+			activeOrgId: "org-existing",
+			profiles: { "org-existing": CREDS },
+		});
+		writeFileSync(path, legacy, { mode: 0o600 });
+		writeFileSync(credentialsPath, previousCredentials, { mode: 0o600 });
+		mkdirSync(`${credentialsPath}.v1-backup`, { mode: 0o700 });
+
+		expect(() => saveConfig(CREDS, path, credentialsPath)).toThrow();
+		expect(readFileSync(path, "utf-8")).toBe(legacy);
+		expect(readFileSync(credentialsPath, "utf-8")).toBe(previousCredentials);
 	});
 
 	it("repairs an existing owner-readable Bridge config before panel access", () => {
@@ -111,6 +147,24 @@ describe("secure Bridge profiles", () => {
 			"org-2",
 		]);
 		expect(credentials.profiles["org-1"].apiKey).toBe("key-new");
+	});
+
+	it("logs out only the active organization profile", () => {
+		saveConfig(CREDS, path);
+		saveConfig(
+			{
+				serverUrl: "https://y.test/mcp/",
+				apiKey: "key-two",
+				orgId: "org-2",
+			},
+			path,
+		);
+
+		expect(clearActiveCredential(path)).toBe(true);
+		expect(loadConfigFromFiles(path, credentialsPath)).toBeNull();
+		const credentials = JSON.parse(readFileSync(credentialsPath, "utf-8"));
+		expect(credentials.activeOrgId).toBe("");
+		expect(credentials.profiles).toEqual({ "org-1": CREDS });
 	});
 
 	it("persists bounded panel preferences in the non-secret Bridge file", () => {

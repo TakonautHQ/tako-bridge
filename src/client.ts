@@ -9,18 +9,89 @@ import type { AgenticWorkspaceCompletionEvidence } from "./git";
 import type { CapabilityEnvelope, SignedAgenticManifest } from "./manifest";
 import { bridgeServerUrl } from "./server-url.js";
 
-function parseToolJson(result: any): any {
-	const text = String(
+const GENERIC_TOOL_IO_LIMIT_BYTES = 8 * 1024;
+const CATALOG_SCHEMA_LIMIT_BYTES = 32 * 1024;
+const CATALOG_DESCRIPTION_LIMIT = 2_000;
+const CATALOG_TOOL_NAME = /^[a-zA-Z][a-zA-Z0-9_-]{0,127}$/;
+
+function byteLength(value: string): number {
+	return Buffer.byteLength(value, "utf8");
+}
+
+function toolText(result: any): string {
+	return String(
 		result?.content?.find?.((c: any) => c.type === "text")?.text ?? "",
 	);
+}
+
+function ensureToolSuccess(result: any): string {
+	const text = toolText(result);
 	if (result?.isError === true) {
 		throw new Error(text.slice(0, 2_000) || "Takonaut tool request failed.");
 	}
+	return text;
+}
+
+function parseToolJson(result: any): any {
+	const text = ensureToolSuccess(result);
 	try {
 		return JSON.parse(text || "{}");
 	} catch {
 		throw new Error("Takonaut returned an invalid successful tool response.");
 	}
+}
+
+function parseGenericToolResult(result: any): unknown {
+	const text = ensureToolSuccess(result);
+	try {
+		return JSON.parse(text || "{}");
+	} catch {
+		return text;
+	}
+}
+
+function boundedUtf8(value: string, maxBytes: number): string {
+	let bounded = value.slice(0, maxBytes);
+	while (byteLength(bounded) > maxBytes) bounded = bounded.slice(0, -1);
+	return bounded;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+export interface TakonautMcpTool {
+	name: string;
+	description: string;
+	inputSchema: Record<string, unknown>;
+}
+
+function parseCatalogTool(value: unknown): TakonautMcpTool {
+	if (!isRecord(value) || !CATALOG_TOOL_NAME.test(String(value.name ?? ""))) {
+		throw new Error("Takonaut returned an invalid MCP tool name.");
+	}
+	if (!isRecord(value.inputSchema)) {
+		throw new Error("Takonaut returned an invalid MCP tool schema.");
+	}
+	let schemaJson: string;
+	let inputSchema: Record<string, unknown>;
+	try {
+		schemaJson = JSON.stringify(value.inputSchema);
+		inputSchema = JSON.parse(schemaJson) as Record<string, unknown>;
+	} catch {
+		throw new Error("Takonaut returned an invalid MCP tool schema.");
+	}
+	if (byteLength(schemaJson) > CATALOG_SCHEMA_LIMIT_BYTES) {
+		throw new Error("Takonaut returned an MCP tool schema larger than 32 KB.");
+	}
+	return {
+		name: String(value.name),
+		description: String(value.description ?? "").slice(
+			0,
+			CATALOG_DESCRIPTION_LIMIT,
+		),
+		inputSchema,
+	};
 }
 
 export interface StartableTask {
@@ -279,9 +350,11 @@ export class TakonautClient {
 	private connected = false;
 	private connectPromise: Promise<void> | undefined;
 
-	constructor(private cfg: TakonautConfig) {
+	constructor(
+		private cfg: Pick<TakonautConfig, "serverUrl" | "apiKey" | "orgId">,
+	) {
 		this.client = new Client(
-			{ name: "tako-bridge", version: "0.4.14" },
+			{ name: "tako-bridge", version: "0.4.15" },
 			{ capabilities: {} },
 		);
 	}
@@ -312,20 +385,57 @@ export class TakonautClient {
 		await this.connectPromise;
 	}
 
-	private async call(
+	private async requestTool(
 		name: string,
 		args: Record<string, unknown>,
 		timeoutMs?: number,
 	): Promise<any> {
 		await this.ensure();
 		const request = { name, arguments: args };
-		const response =
-			timeoutMs === undefined
-				? await this.client.callTool(request)
-				: await this.client.callTool(request, undefined, {
-						timeout: timeoutMs,
-					});
-		return parseToolJson(response);
+		return timeoutMs === undefined
+			? this.client.callTool(request)
+			: this.client.callTool(request, undefined, { timeout: timeoutMs });
+	}
+
+	private async call(
+		name: string,
+		args: Record<string, unknown>,
+		timeoutMs?: number,
+	): Promise<any> {
+		return parseToolJson(await this.requestTool(name, args, timeoutMs));
+	}
+
+	async listTools(): Promise<TakonautMcpTool[]> {
+		await this.ensure();
+		const result = await this.client.listTools();
+		const tools = Array.isArray(result?.tools) ? result.tools : [];
+		const parsed = tools.map(parseCatalogTool);
+		if (new Set(parsed.map((tool) => tool.name)).size !== parsed.length) {
+			throw new Error("Takonaut returned duplicate MCP tool names.");
+		}
+		return parsed;
+	}
+
+	async callTool(
+		name: string,
+		args: Record<string, unknown>,
+	): Promise<unknown> {
+		if (!CATALOG_TOOL_NAME.test(name)) {
+			throw new Error("Invalid Takonaut MCP tool name.");
+		}
+		const argumentsJson = JSON.stringify(args);
+		if (byteLength(argumentsJson) > GENERIC_TOOL_IO_LIMIT_BYTES) {
+			throw new Error("Takonaut MCP tool arguments exceed the 8 KB limit.");
+		}
+		const result = parseGenericToolResult(await this.requestTool(name, args));
+		const resultJson = JSON.stringify(result);
+		if (byteLength(resultJson) > GENERIC_TOOL_IO_LIMIT_BYTES) {
+			return {
+				truncated: true,
+				preview: boundedUtf8(resultJson, GENERIC_TOOL_IO_LIMIT_BYTES),
+			};
+		}
+		return result;
 	}
 
 	listStartableTasks(

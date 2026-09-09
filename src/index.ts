@@ -30,9 +30,11 @@ import {
 	type GitHubRepositoryContext,
 	type StartableTask,
 } from "./client";
+import { TakonautToolCatalog } from "./catalog";
 import { collectLocalContext, formatLocalContextForInjection } from "./context";
 import { readAndPrepareDiagnostic } from "./diagnostics";
 import {
+	clearActiveCredential,
 	loadConfig,
 	loadPanelSettings,
 	projectRepoMappingKey,
@@ -43,6 +45,7 @@ import {
 	type TakonautConfig,
 } from "./config";
 import { runDeviceLogin, type DeviceDeps } from "./device";
+import { removeExactTakonautMcpEntry } from "./mcp-config-cleanup";
 import {
 	collectAgenticWorkspaceCompletionEvidence,
 	fromPiExecResult,
@@ -171,15 +174,20 @@ async function withSyncTimeout<T>(
 export default function takonautExtension(pi: ExtensionAPI): void {
 	let cfg: TakonautConfig | null = null;
 	let client: TakonautClient | null = null;
+	let connectionSuppressed = false;
 	let stopTelemetry: (() => void) | null = null;
+	let connectionGeneration = 0;
 	let panelTimer: ReturnType<typeof setInterval> | null = null;
+	let panelGeneration = 0;
+	let panelActive = false;
 	let panelRefreshInFlight = false;
-	let panelRefreshQueued = false;
+	let panelRefreshQueuedGeneration: number | null = null;
 	let cachedPanelTasks: StartableTask[] = [];
 	let cachedStandupStatus: "pending" | "submitted" | null = null;
 	let panelSync = idleSyncDebug();
 	let telemetrySync = idleSyncDebug();
 	let reconcileSync = idleSyncDebug();
+	const toolCatalog = new TakonautToolCatalog(pi, () => client);
 
 	const runner: CommandRunner = async (command, args, options) =>
 		execute(pi, command, args, options);
@@ -204,6 +212,10 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	}
 
 	function ensure(ctx: ExtensionContext): TakonautClient | null {
+		if (connectionSuppressed) {
+			note(ctx, "Takonaut is disconnected for this Pi session.", "error");
+			return null;
+		}
 		if (!cfg) cfg = loadConfig();
 		if (!cfg) {
 			note(
@@ -219,6 +231,10 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	}
 
 	function currentConfig(ctx: ExtensionContext): TakonautConfig | null {
+		if (connectionSuppressed) {
+			note(ctx, "Not connected — run /tako-login.", "error");
+			return null;
+		}
 		const loaded = cfg ?? (cfg = loadConfig());
 		if (!loaded) note(ctx, "Not connected — run /tako-login.", "error");
 		return loaded;
@@ -238,6 +254,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		};
 	}
 
+	// Stable gateway tools remain available alongside the live MCP catalog.
 	pi.registerTool({
 		name: "tako_search_capabilities",
 		label: "Search Takonaut",
@@ -348,6 +365,9 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	}
 
 	function stopPanel(): void {
+		panelGeneration += 1;
+		panelActive = false;
+		panelRefreshQueuedGeneration = null;
 		if (panelTimer) clearInterval(panelTimer);
 		panelTimer = null;
 	}
@@ -439,10 +459,12 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			ctx.ui.setWidget("tako-bridge-panel", undefined);
 			return;
 		}
+		if (!panelActive) return;
+		const generation = panelGeneration;
 		const conn = ensure(ctx);
 		if (!conn) return;
 		if (panelRefreshInFlight) {
-			panelRefreshQueued = true;
+			panelRefreshQueuedGeneration = generation;
 			panelSync = { ...panelSync, skipped: panelSync.skipped + 1 };
 			renderCurrentPanel(ctx, c, settings);
 			return;
@@ -472,6 +494,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				PANEL_REFRESH_TIMEOUT_MS,
 				"panel_refresh_timeout",
 			);
+			if (!panelActive || generation !== panelGeneration) return;
 			cachedPanelTasks = tasks;
 			cachedStandupStatus = standup?.status ?? null;
 			panelSync = {
@@ -482,6 +505,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			};
 			renderConfiguredPanel(ctx, c, loadPanelSettings(c.configPath));
 		} catch (error) {
+			if (!panelActive || generation !== panelGeneration) return;
 			const timedOut =
 				error instanceof Error && error.message === "panel_refresh_timeout";
 			panelSync = {
@@ -498,8 +522,13 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			}
 		} finally {
 			panelRefreshInFlight = false;
-			if (panelRefreshQueued) {
-				panelRefreshQueued = false;
+			const queuedGeneration = panelRefreshQueuedGeneration;
+			panelRefreshQueuedGeneration = null;
+			if (
+				panelActive &&
+				queuedGeneration !== null &&
+				queuedGeneration === panelGeneration
+			) {
 				void refreshPanel(ctx, c, loadPanelSettings(c.configPath));
 			}
 		}
@@ -511,7 +540,9 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		settings: PanelSettings,
 	): void {
 		stopPanel();
-		if (!settings.visible || settings.refreshSeconds === 0) return;
+		if (!settings.visible) return;
+		panelActive = true;
+		if (settings.refreshSeconds === 0) return;
 		panelTimer = setInterval(
 			() => void refreshPanel(ctx, c),
 			settings.refreshSeconds * 1_000,
@@ -799,6 +830,22 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		description:
 			"Connect to Takonaut via device login: /tako-login [api-base-url]",
 		handler: async (args, ctx) => {
+			const environmentControlsConnection = [
+				process.env.TAKONAUT_MCP_URL,
+				process.env.TAKONAUT_API_KEY,
+				process.env.TAKONAUT_ORG_ID,
+			].some(Boolean);
+			if (
+				cfg?.credentialSource === "environment" ||
+				environmentControlsConnection
+			) {
+				note(
+					ctx,
+					"Login is disabled while TAKONAUT_MCP_URL, TAKONAUT_API_KEY, and TAKONAUT_ORG_ID are set. Remove them before switching organizations.",
+					"error",
+				);
+				return;
+			}
 			const base = normalizeBridgeApiBaseUrl(
 				args.trim().split(/\s+/)[0] ||
 					process.env.TAKONAUT_API_BASE ||
@@ -824,15 +871,147 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				log: (message) => note(ctx, message),
 				openUrl,
 			};
+			let candidate: TakonautClient | null = null;
+			const loginGeneration = connectionGeneration;
+			const previousCatalog = toolCatalog.snapshot();
+			let catalogActivated = false;
 			try {
 				const result = await runDeviceLogin(base, deps, 120, hostname());
-				saveConfig(result);
-				if (client) await client.close();
+				if (loginGeneration !== connectionGeneration) return;
+				candidate = new TakonautClient(result);
+				const verifiedTools = await candidate.listTools();
+				if (loginGeneration !== connectionGeneration) {
+					await candidate.close();
+					return;
+				}
+				const preparedCatalog = await toolCatalog.prepare(
+					candidate,
+					verifiedTools,
+				);
+				if (loginGeneration !== connectionGeneration) {
+					await candidate.close();
+					return;
+				}
+
+				const previousClient = client;
+				toolCatalog.activate(preparedCatalog);
+				catalogActivated = true;
+				const nextConfig = saveConfig(result);
+				connectionGeneration += 1;
+				const committedGeneration = connectionGeneration;
+				stopAgentTelemetry();
+				stopPanel();
+				connectionSuppressed = false;
+				cfg = nextConfig;
+				client = candidate;
+				const panelSettings = loadPanelSettings(nextConfig.configPath);
+				startPanelRefresh(ctx, nextConfig, panelSettings);
+				void refreshPanel(ctx, nextConfig, panelSettings);
+
+				try {
+					const cleanup = removeExactTakonautMcpEntry();
+					if (cleanup === "removed") {
+						note(ctx, "✓ Replaced the legacy project Takonaut MCP entry.");
+					}
+				} catch {
+					note(
+						ctx,
+						"Connected, but the legacy project MCP entry could not be removed safely.",
+						"warning",
+					);
+				}
+				if (previousClient && previousClient !== candidate) {
+					try {
+						await previousClient.close();
+					} catch {
+						if (committedGeneration !== connectionGeneration) return;
+						note(
+							ctx,
+							"Connected; the previous MCP transport will close on exit.",
+							"warning",
+						);
+					}
+				}
+				if (committedGeneration !== connectionGeneration) return;
+				note(
+					ctx,
+					`✓ Connected with ${verifiedTools.length} authorized MCP tools. Run /tako-status, then /tako-tasks.`,
+				);
+			} catch (error) {
+				if (loginGeneration !== connectionGeneration) {
+					if (candidate && candidate !== client) await candidate.close();
+					return;
+				}
+				if (catalogActivated) {
+					try {
+						if (previousCatalog) toolCatalog.activate(previousCatalog);
+						else toolCatalog.clear();
+					} catch {
+						try {
+							toolCatalog.clear();
+						} catch {
+							// The original login error remains the actionable failure.
+						}
+					}
+				}
+				if (candidate && candidate !== client) await candidate.close();
+				note(ctx, `Login failed: ${errMsg(error)}`, "error");
+			}
+		},
+	});
+
+	pi.registerCommand("tako-logout", {
+		description:
+			"Disconnect Tako Bridge and remove the active organization credential",
+		handler: async (_args, ctx) => {
+			try {
+				connectionGeneration += 1;
+				connectionSuppressed = true;
+				const activeConfig = cfg;
+				const previousClient = client;
+				stopAgentTelemetry();
+				stopPanel();
+				ctx.ui?.setWidget?.("tako-bridge-panel", undefined);
+				toolCatalog.clear();
 				client = null;
 				cfg = null;
-				note(ctx, "✓ Connected. Run /tako-status, then /tako-tasks.");
+
+				if (previousClient) {
+					try {
+						await previousClient.close();
+					} catch {
+						// Runtime state is already disabled; the transport closes on exit.
+					}
+				}
+
+				let removed = false;
+				let credentialError: unknown;
+				if (activeConfig?.credentialSource === "secure file") {
+					try {
+						removed = clearActiveCredential(
+							activeConfig.configPath,
+							activeConfig.credentialPath,
+						);
+					} catch (error) {
+						credentialError = error;
+					}
+				}
+				if (credentialError) {
+					note(
+						ctx,
+						"Disconnected, but the stored active credential could not be removed safely.",
+						"warning",
+					);
+					return;
+				}
+				note(
+					ctx,
+					removed
+						? "✓ Disconnected and removed the active Takonaut credential."
+						: "✓ Disconnected this Pi session; no stored active credential was present.",
+				);
 			} catch (error) {
-				note(ctx, `Login failed: ${errMsg(error)}`, "error");
+				note(ctx, `Logout failed: ${errMsg(error)}`, "error");
 			}
 		},
 	});
@@ -843,6 +1022,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			const c = currentConfig(ctx);
 			const conn = ensure(ctx);
 			if (!c || !conn) return;
+			const statusGeneration = connectionGeneration;
 			const sessionId = piSessionId(ctx);
 			const active = loadActiveAgenticRun(undefined, c.orgId, sessionId);
 			const startedAt = Date.now();
@@ -865,6 +1045,13 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					RECONCILE_TIMEOUT_MS,
 					"reconcile_timeout",
 				);
+				if (
+					statusGeneration !== connectionGeneration ||
+					client !== conn ||
+					cfg !== c
+				) {
+					return;
+				}
 				reconcileSync = {
 					...reconcileSync,
 					state: "ok",
@@ -927,6 +1114,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 						`${status.next_command ?? `/tako-status ${active.taskKey}`}`,
 				);
 			} catch (error) {
+				if (statusGeneration !== connectionGeneration) return;
 				const timedOut =
 					error instanceof Error && error.message === "reconcile_timeout";
 				reconcileSync = {
@@ -962,6 +1150,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					"error",
 				);
 			}
+			const reconnectGeneration = connectionGeneration;
 			try {
 				const result = await conn.reauthorizeAgenticDeliverySession({
 					runId: active.runId,
@@ -969,6 +1158,13 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					expectedVersion: active.versionNumber,
 					idempotencyKey: `reauthorize:${active.runId}:${active.serverSessionId}`,
 				});
+				if (
+					reconnectGeneration !== connectionGeneration ||
+					client !== conn ||
+					cfg !== c
+				) {
+					return;
+				}
 				const reconciled: ActiveAgenticDeliveryRun = {
 					...active,
 					status: result.status,
@@ -989,6 +1185,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					`${active.taskKey} session reauthorized. The Run was reconciled but not automatically resumed.`,
 				);
 			} catch (error) {
+				if (reconnectGeneration !== connectionGeneration) return;
 				if (observeAgenticFeatureDisable(ctx, active, error)) return;
 				note(
 					ctx,
@@ -1015,8 +1212,8 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 						onSettingsChange: (next) => {
 							settings = next;
 							savePanelSettings(settings, c.configPath);
-							void refreshPanel(ctx, c, settings);
 							startPanelRefresh(ctx, c, settings);
+							void refreshPanel(ctx, c, settings);
 						},
 						onRefresh: () => void refreshPanel(ctx, c, settings),
 						onDone: () => done(undefined),
@@ -1268,7 +1465,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					clientId,
 					sessionId,
 					sessionLabel: `${hostname()} - ${taskKey}`,
-					extensionVersion: "0.4.14",
+					extensionVersion: "0.4.15",
 					manifestSchemaVersion: 2,
 					idempotencyKey: `start:${sessionId}:${startNonce}`,
 					baseRefOverrides,
@@ -1313,7 +1510,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					organizationId: c.orgId,
 					projectId: started.project_id,
 					minimumRevision: projectSync?.acceptedRevision ?? 0,
-					extensionVersion: "0.4.14",
+					extensionVersion: "0.4.15",
 				});
 				const capabilityExpansion = capabilityExpansionRequired(
 					projectSync?.capabilityEnvelope ?? null,
@@ -2671,9 +2868,45 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			}
 			return;
 		}
+		if (!client) client = new TakonautClient(c);
+		const startupGeneration = connectionGeneration;
+		const startupClient = client;
 		const panelSettings = loadPanelSettings(c.configPath);
-		await refreshPanel(ctx, c, panelSettings);
 		startPanelRefresh(ctx, c, panelSettings);
+		await refreshPanel(ctx, c, panelSettings);
+		if (
+			startupGeneration !== connectionGeneration ||
+			client !== startupClient
+		) {
+			return;
+		}
+		try {
+			const verifiedTools = await startupClient.listTools();
+			const preparedCatalog = await toolCatalog.prepare(
+				startupClient,
+				verifiedTools,
+			);
+			if (
+				startupGeneration !== connectionGeneration ||
+				client !== startupClient
+			) {
+				return;
+			}
+			toolCatalog.activate(preparedCatalog);
+		} catch {
+			if (
+				startupGeneration !== connectionGeneration ||
+				client !== startupClient
+			) {
+				return;
+			}
+			toolCatalog.clear();
+			note(
+				ctx,
+				"Takonaut connected, but its authorized MCP catalog could not be refreshed.",
+				"warning",
+			);
+		}
 		const active = loadActiveAgenticRun(undefined, c.orgId, piSessionId(ctx));
 		if (!active) return;
 		note(
@@ -2691,13 +2924,16 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		connectionGeneration += 1;
+		connectionSuppressed = true;
 		stopPanel();
 		ctx.ui?.setWidget?.("tako-bridge-panel", undefined);
 		stopAgentTelemetry();
-		if (client) {
-			await client.close();
-			client = null;
-		}
+		toolCatalog.clear();
+		const previousClient = client;
+		client = null;
+		cfg = null;
+		if (previousClient) await previousClient.close();
 	});
 	// An agent turn ending is not proof that code is committed, pushed, tested, or
 	// represented by an open PR. Submission is therefore explicit and recoverable.

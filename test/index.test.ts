@@ -46,6 +46,8 @@ const mocks = vi.hoisted(() => ({
 		credentialPath: "/home/dev/.takonaut/credentials.json",
 	} as Record<string, unknown> | null,
 	close: vi.fn(),
+	listTools: vi.fn(),
+	callTool: vi.fn(),
 	listStartableTasks: vi.fn(),
 	searchCapabilities: vi.fn(),
 	readCapability: vi.fn(),
@@ -64,6 +66,10 @@ const mocks = vi.hoisted(() => ({
 		standupProjectKey: undefined as string | undefined,
 	},
 	savePanelSettings: vi.fn(),
+	saveConfig: vi.fn(),
+	clearActiveCredential: vi.fn(),
+	runDeviceLogin: vi.fn(),
+	removeExactTakonautMcpEntry: vi.fn(),
 	getBridgeTaskContext: vi.fn(),
 	startAgenticDelivery: vi.fn(),
 	activateAgenticDelivery: vi.fn(),
@@ -116,7 +122,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../src/config", () => ({
 	loadConfig: () => mocks.config,
-	saveConfig: vi.fn(),
+	saveConfig: mocks.saveConfig,
+	clearActiveCredential: mocks.clearActiveCredential,
 	loadPanelSettings: () => mocks.panelSettings,
 	savePanelSettings: mocks.savePanelSettings,
 	projectRepoMappingKey: (orgId: string, projectId: string) =>
@@ -127,6 +134,8 @@ vi.mock("../src/config", () => ({
 vi.mock("../src/client", () => ({
 	TakonautClient: class {
 		close = mocks.close;
+		listTools = mocks.listTools;
+		callTool = mocks.callTool;
 		listStartableTasks = mocks.listStartableTasks;
 		searchCapabilities = mocks.searchCapabilities;
 		readCapability = mocks.readCapability;
@@ -158,6 +167,14 @@ vi.mock("../src/client", () => ({
 		finalizeAgenticDeliveryCompletion = mocks.finalizeAgenticDeliveryCompletion;
 		reportAgentTelemetry = mocks.reportAgentTelemetry;
 	},
+}));
+
+vi.mock("../src/device", () => ({
+	runDeviceLogin: mocks.runDeviceLogin,
+}));
+
+vi.mock("../src/mcp-config-cleanup", () => ({
+	removeExactTakonautMcpEntry: mocks.removeExactTakonautMcpEntry,
 }));
 
 vi.mock("../src/context", () => ({
@@ -252,6 +269,7 @@ function commandContext(notify = vi.fn()) {
 describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
+		vi.unstubAllEnvs();
 		mocks.calls.length = 0;
 		mocks.config = {
 			serverUrl: "https://takonaut.test/mcp/",
@@ -279,6 +297,27 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		mocks.savePanelSettings.mockImplementation((settings) => {
 			mocks.panelSettings = { ...settings };
 		});
+		mocks.saveConfig.mockImplementation((result) => {
+			mocks.config = {
+				...result,
+				repoRoot: "/work/repo",
+				protectedBranches: ["main"],
+				projectRepos: {},
+				credentialSource: "secure file",
+				configPath: "/home/dev/.takonaut/bridge.json",
+				credentialPath: "/home/dev/.takonaut/credentials.json",
+			};
+			return mocks.config;
+		});
+		mocks.runDeviceLogin.mockResolvedValue({
+			serverUrl: "https://takonaut.test/mcp/",
+			apiKey: "replacement-secret",
+			orgId: "org-456",
+		});
+		mocks.removeExactTakonautMcpEntry.mockReturnValue("absent");
+		mocks.clearActiveCredential.mockReturnValue(true);
+		mocks.listTools.mockResolvedValue([]);
+		mocks.callTool.mockResolvedValue({});
 		mocks.listStartableTasks.mockResolvedValue({ tasks: [] });
 		mocks.getBridgeStandupStatus.mockResolvedValue({
 			project_key: "PAY",
@@ -550,10 +589,22 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		const commands = new Map<string, Handler>();
 		const events = new Map<string, Handler>();
 		const tools = new Map<string, any>();
+		let activeTools = [
+			"read",
+			"tako_search_capabilities",
+			"tako_read",
+			"tako_action",
+		];
 		const pi = {
 			registerCommand: (name: string, options: { handler: Handler }) =>
 				commands.set(name, options.handler),
-			registerTool: (definition: any) => tools.set(definition.name, definition),
+			registerTool: vi.fn((definition: any) => {
+				tools.set(definition.name, definition);
+			}),
+			getActiveTools: vi.fn(() => [...activeTools]),
+			setActiveTools: vi.fn((names: string[]) => {
+				activeTools = [...names];
+			}),
 			on: (name: string, handler: Handler) => events.set(name, handler),
 			exec: vi.fn(async (_command: string, _args: string[]) => ({
 				stdout: "ok\n",
@@ -563,7 +614,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			sendUserMessage: vi.fn(),
 		};
 		takonautExtension(pi as any);
-		return { commands, events, tools, pi };
+		return { commands, events, tools, pi, activeTools: () => activeTools };
 	}
 
 	function renderPanel(ctx: ReturnType<typeof commandContext>, width = 80) {
@@ -579,7 +630,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		return factory({}, theme).render(width) as string[];
 	}
 
-	it("registers only the three stable lazy capability tools", () => {
+	it("registers only the three stable lazy capability tools before authentication", () => {
 		const { tools } = setup();
 
 		expect([...tools.keys()]).toEqual([
@@ -587,6 +638,262 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			"tako_read",
 			"tako_action",
 		]);
+	});
+
+	it("registers the authenticated MCP catalog at session start", async () => {
+		mocks.listTools.mockResolvedValue([
+			{
+				name: "list_tasks",
+				description: "List authorized tasks",
+				inputSchema: { type: "object", properties: {} },
+			},
+		]);
+		const { events, tools, activeTools } = setup();
+		const ctx = { ...commandContext(), mode: "rpc" };
+
+		await events.get("session_start")?.({}, ctx);
+
+		expect(tools.has("tako_mcp_list_tasks")).toBe(true);
+		expect(activeTools()).toContain("tako_mcp_list_tasks");
+	});
+
+	it("verifies login, replaces the exact legacy MCP entry, and activates the new catalog", async () => {
+		mocks.config = null;
+		mocks.listTools.mockResolvedValue([
+			{
+				name: "create_task",
+				description: "Create an authorized task",
+				inputSchema: { type: "object", properties: {} },
+			},
+		]);
+		mocks.removeExactTakonautMcpEntry.mockReturnValue("removed");
+		const { commands, tools, activeTools } = setup();
+		const ctx = commandContext();
+
+		await commands.get("tako-login")?.("", ctx);
+
+		expect(mocks.runDeviceLogin).toHaveBeenCalledOnce();
+		expect(mocks.listTools).toHaveBeenCalledOnce();
+		expect(mocks.saveConfig).toHaveBeenCalledOnce();
+		expect(mocks.removeExactTakonautMcpEntry).toHaveBeenCalledOnce();
+		expect(tools.has("tako_mcp_create_task")).toBe(true);
+		expect(activeTools()).toContain("tako_mcp_create_task");
+	});
+
+	it("refuses device login while environment credentials control the session", async () => {
+		mocks.config = {
+			serverUrl: "https://takonaut.test/mcp/",
+			apiKey: "environment-secret",
+			orgId: "org-env",
+			credentialSource: "environment",
+		};
+		const { commands, events } = setup();
+		const ctx = { ...commandContext(), mode: "rpc" };
+		await events.get("session_start")?.({}, ctx);
+
+		await commands.get("tako-login")?.("", ctx);
+
+		expect(mocks.runDeviceLogin).not.toHaveBeenCalled();
+		expect(ctx.ui.notify).toHaveBeenCalledWith(
+			expect.stringContaining("Login is disabled"),
+			"error",
+		);
+	});
+
+	it("cannot bypass environment-controlled login by logging out first", async () => {
+		vi.stubEnv("TAKONAUT_MCP_URL", "https://takonaut.test/mcp/");
+		vi.stubEnv("TAKONAUT_API_KEY", "environment-secret");
+		vi.stubEnv("TAKONAUT_ORG_ID", "org-env");
+		const { commands } = setup();
+		const ctx = commandContext();
+
+		await commands.get("tako-logout")?.("", ctx);
+		await commands.get("tako-login")?.("", ctx);
+
+		expect(mocks.runDeviceLogin).not.toHaveBeenCalled();
+		expect(ctx.ui.notify).toHaveBeenCalledWith(
+			expect.stringContaining("Login is disabled"),
+			"error",
+		);
+	});
+
+	it("does not finish an in-flight login after logout", async () => {
+		let resolveLogin!: (value: {
+			serverUrl: string;
+			apiKey: string;
+			orgId: string;
+		}) => void;
+		mocks.runDeviceLogin.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					resolveLogin = resolve;
+				}),
+		);
+		const { commands } = setup();
+		const ctx = commandContext();
+
+		const login = commands.get("tako-login")?.("", ctx);
+		await vi.waitFor(() => expect(mocks.runDeviceLogin).toHaveBeenCalledOnce());
+		await commands.get("tako-logout")?.("", ctx);
+		resolveLogin({
+			serverUrl: "https://takonaut.test/mcp/",
+			apiKey: "stale-secret",
+			orgId: "org-stale",
+		});
+		await login;
+
+		expect(mocks.listTools).not.toHaveBeenCalled();
+		expect(mocks.saveConfig).not.toHaveBeenCalled();
+	});
+
+	it("does not persist or remove legacy config when catalog registration fails", async () => {
+		mocks.config = null;
+		mocks.listTools.mockResolvedValue([
+			{
+				name: "create_task",
+				description: "Create an authorized task",
+				inputSchema: { type: "object", properties: {} },
+			},
+		]);
+		const { commands, pi, activeTools } = setup();
+		pi.registerTool.mockImplementation((definition: any) => {
+			if (definition.name.startsWith("tako_mcp_")) {
+				throw new Error("registration failed");
+			}
+		});
+		const ctx = commandContext();
+
+		await commands.get("tako-login")?.("", ctx);
+
+		expect(mocks.saveConfig).not.toHaveBeenCalled();
+		expect(mocks.removeExactTakonautMcpEntry).not.toHaveBeenCalled();
+		expect(activeTools()).not.toContain("tako_mcp_create_task");
+		expect(ctx.ui.notify).toHaveBeenCalledWith(
+			expect.stringContaining("Login failed"),
+			"error",
+		);
+	});
+
+	it("does not persist credentials when catalog activation fails", async () => {
+		mocks.config = null;
+		mocks.listTools.mockResolvedValue([
+			{
+				name: "create_task",
+				description: "Create an authorized task",
+				inputSchema: { type: "object", properties: {} },
+			},
+		]);
+		const { commands, pi, activeTools } = setup();
+		pi.setActiveTools
+			.mockImplementationOnce(() => undefined)
+			.mockImplementationOnce(() => {
+				throw new Error("activation failed");
+			})
+			.mockImplementation(() => undefined);
+		const ctx = commandContext();
+
+		await commands.get("tako-login")?.("", ctx);
+
+		expect(mocks.saveConfig).not.toHaveBeenCalled();
+		expect(mocks.removeExactTakonautMcpEntry).not.toHaveBeenCalled();
+		expect(activeTools()).not.toContain("tako_mcp_create_task");
+	});
+
+	it("logs out by removing only the active credential and disabling dynamic tools", async () => {
+		mocks.close.mockImplementationOnce(async () => {
+			mocks.calls.push("close-client");
+		});
+		mocks.clearActiveCredential.mockImplementationOnce(() => {
+			mocks.calls.push("clear-credential");
+			return true;
+		});
+		mocks.listTools.mockResolvedValue([
+			{
+				name: "list_tasks",
+				description: "List authorized tasks",
+				inputSchema: { type: "object", properties: {} },
+			},
+		]);
+		const { commands, events, activeTools } = setup();
+		const ctx = { ...commandContext(), mode: "rpc" };
+		await events.get("session_start")?.({}, ctx);
+		expect(activeTools()).toContain("tako_mcp_list_tasks");
+
+		await commands.get("tako-logout")?.("", ctx);
+
+		expect(mocks.clearActiveCredential).toHaveBeenCalledWith(
+			"/home/dev/.takonaut/bridge.json",
+			"/home/dev/.takonaut/credentials.json",
+		);
+		expect(mocks.close).toHaveBeenCalledOnce();
+		expect(mocks.calls).toEqual(["close-client", "clear-credential"]);
+		expect(ctx.ui.setWidget).toHaveBeenLastCalledWith(
+			"tako-bridge-panel",
+			undefined,
+		);
+		expect(activeTools()).not.toContain("tako_mcp_list_tasks");
+		expect(activeTools()).toContain("read");
+	});
+
+	it("disconnects runtime state even when credential deletion fails", async () => {
+		mocks.listTools.mockResolvedValue([
+			{
+				name: "list_tasks",
+				description: "List authorized tasks",
+				inputSchema: { type: "object", properties: {} },
+			},
+		]);
+		mocks.clearActiveCredential.mockImplementationOnce(() => {
+			throw new Error("credential file is locked");
+		});
+		const { commands, events, tools, activeTools } = setup();
+		const ctx = { ...commandContext(), mode: "rpc" };
+		await events.get("session_start")?.({}, ctx);
+
+		await commands.get("tako-logout")?.("", ctx);
+		await tools
+			.get("tako_read")
+			.execute(
+				"call-1",
+				{ capability_id: "task.read", arguments: {} },
+				undefined,
+				undefined,
+				ctx,
+			);
+
+		expect(mocks.close).toHaveBeenCalledOnce();
+		expect(activeTools()).not.toContain("tako_mcp_list_tasks");
+		expect(mocks.readCapability).not.toHaveBeenCalled();
+		expect(ctx.ui.setWidget).toHaveBeenLastCalledWith(
+			"tako-bridge-panel",
+			undefined,
+		);
+	});
+
+	it("does not let an in-flight startup refresh resurrect the panel after logout", async () => {
+		let resolveTasks!: (value: { tasks: [] }) => void;
+		mocks.listStartableTasks.mockImplementationOnce(
+			() =>
+				new Promise<{ tasks: [] }>((resolve) => {
+					resolveTasks = resolve;
+				}),
+		);
+		const { commands, events } = setup();
+		const ctx = { ...commandContext(), mode: "tui" };
+
+		const startup = events.get("session_start")?.({}, ctx);
+		await vi.waitFor(() =>
+			expect(mocks.listStartableTasks).toHaveBeenCalledOnce(),
+		);
+		await commands.get("tako-logout")?.("", ctx);
+		resolveTasks({ tasks: [] });
+		await startup;
+
+		expect(ctx.ui.setWidget).toHaveBeenLastCalledWith(
+			"tako-bridge-panel",
+			undefined,
+		);
+		expect(mocks.listTools).not.toHaveBeenCalled();
 	});
 
 	it("searches and reads only through the bounded Takonaut gateway", async () => {
@@ -1178,7 +1485,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			clientId: "client-1",
 			sessionId: "pi-session-1",
 			sessionLabel: expect.stringContaining("PAY-142"),
-			extensionVersion: "0.4.14",
+			extensionVersion: "0.4.15",
 			manifestSchemaVersion: 2,
 			baseRefOverrides: [],
 			idempotencyKey: expect.stringMatching(
@@ -1683,6 +1990,77 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			reauthorizationRequired: false,
 			versionNumber: 5,
 		});
+	});
+
+	it("does not finish an in-flight status or reconnect after logout", async () => {
+		const active = {
+			version: 1,
+			orgId: "org-123",
+			clientId: "client-1",
+			piSessionId: "pi-session-1",
+			serverSessionId: "server-session-1",
+			runId: "run-1",
+			taskId: "task-1",
+			taskKey: "PAY-142",
+			projectId: "project-1",
+			projectKey: "PAY",
+			repoRoot: "/work/repo",
+			status: "active",
+			executorPhase: "executing_approved_plan",
+			versionNumber: 4,
+			telemetrySequence: 0,
+			featureDisabled: false,
+			reauthorizationRequired: true,
+			worktrees: [],
+			completionTests: {},
+			startedAt: "2030-01-01T00:00:00.000Z",
+			lastActivityAt: "2030-01-01T00:00:00.000Z",
+			updatedAt: "2030-01-01T00:00:00.000Z",
+		};
+		mocks.storedAgenticRun = active;
+		let resolveStatus!: (value: any) => void;
+		mocks.getAgenticDeliveryStatus.mockImplementationOnce(
+			() => new Promise((resolve) => (resolveStatus = resolve)),
+		);
+		const { commands } = setup();
+		const ctx = commandContext();
+
+		const status = commands.get("tako-status")?.("", ctx);
+		await vi.waitFor(() =>
+			expect(mocks.getAgenticDeliveryStatus).toHaveBeenCalledOnce(),
+		);
+		await commands.get("tako-logout")?.("", ctx);
+		resolveStatus({
+			run_id: "run-1",
+			session_id: "server-session-1",
+			status: "active",
+			executor_phase: "executing_approved_plan",
+			version: 5,
+			reauthorization_required: false,
+		});
+		await status;
+		expect(mocks.saveActiveAgenticRun).not.toHaveBeenCalled();
+		expect(mocks.startAgentTelemetryReporter).not.toHaveBeenCalled();
+
+		mocks.storedAgenticRun = active;
+		let resolveReconnect!: (value: any) => void;
+		mocks.reauthorizeAgenticDeliverySession.mockImplementationOnce(
+			() => new Promise((resolve) => (resolveReconnect = resolve)),
+		);
+		const second = setup();
+		const reconnect = second.commands.get("tako-reconnect")?.("", ctx);
+		await vi.waitFor(() =>
+			expect(mocks.reauthorizeAgenticDeliverySession).toHaveBeenCalledOnce(),
+		);
+		await second.commands.get("tako-logout")?.("", ctx);
+		resolveReconnect({
+			status: "active",
+			executor_phase: "executing_approved_plan",
+			version: 5,
+		});
+		await reconnect;
+		expect(mocks.saveActiveAgenticRun).not.toHaveBeenCalled();
+		expect(mocks.startAgentTelemetryReporter).not.toHaveBeenCalled();
 	});
 
 	it("records Workspace tests, proposes one completion, and explicitly finalizes", async () => {

@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// The SDK client is mocked at the transport boundary so catalog discovery stays deterministic.
 const mocks = vi.hoisted(() => ({
 	connect: vi.fn(),
+	listTools: vi.fn(),
 	callTool: vi.fn(),
 	close: vi.fn(),
 	streamableTransport: vi.fn(),
@@ -10,6 +12,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
 	Client: class {
 		connect = mocks.connect;
+		listTools = mocks.listTools;
 		callTool = mocks.callTool;
 		close = mocks.close;
 	},
@@ -40,9 +43,90 @@ const cfg = {
 describe("TakonautClient transport", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
+		mocks.listTools.mockResolvedValue({ tools: [] });
 		mocks.callTool.mockResolvedValue({
 			content: [{ type: "text", text: JSON.stringify({ tasks: [] }) }],
 		});
+	});
+
+	it("discovers the caller-filtered MCP catalog over the authenticated connection", async () => {
+		mocks.listTools.mockResolvedValue({
+			tools: [
+				{
+					name: "list_tasks",
+					description: "List tasks the connected user may view.",
+					inputSchema: {
+						type: "object",
+						properties: { project_key: { type: "string" } },
+						additionalProperties: false,
+					},
+				},
+			],
+		});
+		const client = new TakonautClient(cfg);
+
+		await expect(client.listTools()).resolves.toEqual([
+			{
+				name: "list_tasks",
+				description: "List tasks the connected user may view.",
+				inputSchema: {
+					type: "object",
+					properties: { project_key: { type: "string" } },
+					additionalProperties: false,
+				},
+			},
+		]);
+		expect(mocks.listTools).toHaveBeenCalledOnce();
+		expect(mocks.connect).toHaveBeenCalledOnce();
+	});
+
+	it("calls a discovered MCP tool generically and enforces the argument bound", async () => {
+		mocks.callTool.mockResolvedValue({
+			content: [{ type: "text", text: JSON.stringify({ tasks: ["PAY-1"] }) }],
+		});
+		const client = new TakonautClient(cfg);
+
+		await expect(
+			client.callTool("list_tasks", { project_key: "PAY" }),
+		).resolves.toEqual({ tasks: ["PAY-1"] });
+		expect(mocks.callTool).toHaveBeenCalledWith({
+			name: "list_tasks",
+			arguments: { project_key: "PAY" },
+		});
+
+		await expect(
+			client.callTool("list_tasks", { query: "x".repeat(8_192) }),
+		).rejects.toThrow("8 KB");
+		expect(mocks.callTool).toHaveBeenCalledTimes(1);
+	});
+
+	it("preserves successful plain-text MCP tool results", async () => {
+		mocks.callTool.mockResolvedValue({
+			content: [{ type: "text", text: "Standup summary: all submitted." }],
+		});
+		const client = new TakonautClient(cfg);
+
+		await expect(client.callTool("get_standup_summary", {})).resolves.toBe(
+			"Standup summary: all submitted.",
+		);
+	});
+
+	it("bounds generic MCP output by UTF-8 bytes", async () => {
+		mocks.callTool.mockResolvedValue({
+			content: [
+				{ type: "text", text: JSON.stringify({ value: "🐙".repeat(4_000) }) },
+			],
+		});
+		const client = new TakonautClient(cfg);
+
+		const result = (await client.callTool("get_task", {
+			task_key: "PAY-1",
+		})) as { truncated: boolean; preview: string };
+
+		expect(result.truncated).toBe(true);
+		expect(Buffer.byteLength(result.preview, "utf8")).toBeLessThanOrEqual(
+			8 * 1024,
+		);
 	});
 
 	it("connects with Streamable HTTP and both personal-key headers", async () => {
