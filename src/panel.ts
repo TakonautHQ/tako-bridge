@@ -1,5 +1,6 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { StartableTask } from "./client.js";
+import { BRIDGE_VERSION } from "./version.js";
 
 const WIDE_PANEL_MIN_WIDTH = 100;
 const MEDIUM_PANEL_MIN_WIDTH = 72;
@@ -70,6 +71,15 @@ interface PanelSection {
 	weight: number;
 	primary: PanelSegment[];
 	secondary: PanelSegment[];
+}
+
+function panelTitleSegments(): PanelSegment[] {
+	return [
+		{ text: "─ ", tone: "borderMuted" },
+		{ text: "TAKO BRIDGE", tone: "accent", strong: true },
+		{ text: ` v${BRIDGE_VERSION}`, tone: "dim" },
+		{ text: " ", tone: "borderMuted" },
+	];
 }
 
 function panelWidth(width: number): number {
@@ -443,21 +453,10 @@ export function createBridgePanelWidget(
 			const blocked = data.tasks.length - ready;
 			const sections = buildSections(data, ready, blocked);
 			const lines = [
-				framedRule(
-					theme,
-					resolvedWidth,
-					"╭",
-					"╮",
-					[
-						{ text: "─ ", tone: "borderMuted" },
-						{ text: "TAKO BRIDGE", tone: "accent", strong: true },
-						{ text: " ", tone: "borderMuted" },
-					],
-					[
-						{ text: "● LIVE", tone: "success", strong: true },
-						{ text: " ─", tone: "borderMuted" },
-					],
-				),
+				framedRule(theme, resolvedWidth, "╭", "╮", panelTitleSegments(), [
+					{ text: "● LIVE", tone: "success", strong: true },
+					{ text: " ─", tone: "borderMuted" },
+				]),
 			];
 
 			if (resolvedWidth >= WIDE_PANEL_MIN_WIDTH && sections.length >= 2) {
@@ -546,21 +545,10 @@ export function createBridgePanelLoginWidget(theme: PanelTheme) {
 		render(width: number): string[] {
 			const resolvedWidth = panelWidth(width);
 			return [
-				framedRule(
-					theme,
-					resolvedWidth,
-					"╭",
-					"╮",
-					[
-						{ text: "─ ", tone: "borderMuted" },
-						{ text: "TAKO BRIDGE", tone: "accent", strong: true },
-						{ text: " ", tone: "borderMuted" },
-					],
-					[
-						{ text: "○ SIGN IN", tone: "warning", strong: true },
-						{ text: " ─", tone: "borderMuted" },
-					],
-				),
+				framedRule(theme, resolvedWidth, "╭", "╮", panelTitleSegments(), [
+					{ text: "○ SIGN IN", tone: "warning", strong: true },
+					{ text: " ─", tone: "borderMuted" },
+				]),
 				framedLine(theme, resolvedWidth, [
 					{ text: " Connect Takonaut to see your work here.", tone: "muted" },
 				]),
@@ -596,21 +584,10 @@ export function createBridgePanelErrorWidget(
 		render(width: number): string[] {
 			const resolvedWidth = panelWidth(width);
 			const lines = [
-				framedRule(
-					theme,
-					resolvedWidth,
-					"╭",
-					"╮",
-					[
-						{ text: "─ ", tone: "borderMuted" },
-						{ text: "TAKO BRIDGE", tone: "accent", strong: true },
-						{ text: " ", tone: "borderMuted" },
-					],
-					[
-						{ text: "◇ DELAYED", tone: "warning", strong: true },
-						{ text: " ─", tone: "borderMuted" },
-					],
-				),
+				framedRule(theme, resolvedWidth, "╭", "╮", panelTitleSegments(), [
+					{ text: "◇ DELAYED", tone: "warning", strong: true },
+					{ text: " ─", tone: "borderMuted" },
+				]),
 				framedLine(theme, resolvedWidth, [
 					{ text: ` ${message}`, tone: "muted" },
 				]),

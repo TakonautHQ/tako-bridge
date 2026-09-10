@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { BRIDGE_VERSION } from "../src/version.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const tempHomes: string[] = [];
@@ -177,12 +178,13 @@ describe("Pi package manifest", () => {
 
 	it("uses the package version for runtime identity and manifest negotiation", () => {
 		const version = readPackage().version;
+		expect(BRIDGE_VERSION).toBe(version);
 		expect(
 			readFileSync(join(packageRoot, "src", "client.ts"), "utf-8"),
-		).toContain(`version: "${version}"`);
+		).toContain("version: BRIDGE_VERSION");
 		expect(
 			readFileSync(join(packageRoot, "src", "index.ts"), "utf-8"),
-		).toContain(`extensionVersion: "${version}"`);
+		).toContain("extensionVersion: BRIDGE_VERSION");
 	});
 
 	it("packs only the Bridge runtime and public documentation", () => {
