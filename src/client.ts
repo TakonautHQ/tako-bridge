@@ -8,6 +8,7 @@ import type { TakonautConfig } from "./config";
 import type { AgenticWorkspaceCompletionEvidence } from "./git";
 import type { CapabilityEnvelope, SignedAgenticManifest } from "./manifest";
 import { bridgeServerUrl } from "./server-url.js";
+import { BRIDGE_VERSION } from "./version.js";
 
 const GENERIC_TOOL_IO_LIMIT_BYTES = 8 * 1024;
 const CATALOG_SCHEMA_LIMIT_BYTES = 32 * 1024;
@@ -354,7 +355,7 @@ export class TakonautClient {
 		private cfg: Pick<TakonautConfig, "serverUrl" | "apiKey" | "orgId">,
 	) {
 		this.client = new Client(
-			{ name: "tako-bridge", version: "0.4.16" },
+			{ name: "tako-bridge", version: BRIDGE_VERSION },
 			{ capabilities: {} },
 		);
 	}

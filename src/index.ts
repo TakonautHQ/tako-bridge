@@ -55,6 +55,7 @@ import {
 } from "./git";
 import { evaluateToolCall } from "./policy";
 import { missingCompanionPackages } from "./setup";
+import { BRIDGE_VERSION } from "./version.js";
 import {
 	clearActiveAgenticRun,
 	getOrCreatePiClientId,
@@ -1465,7 +1466,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					clientId,
 					sessionId,
 					sessionLabel: `${hostname()} - ${taskKey}`,
-					extensionVersion: "0.4.16",
+					extensionVersion: BRIDGE_VERSION,
 					manifestSchemaVersion: 2,
 					idempotencyKey: `start:${sessionId}:${startNonce}`,
 					baseRefOverrides,
@@ -1510,7 +1511,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					organizationId: c.orgId,
 					projectId: started.project_id,
 					minimumRevision: projectSync?.acceptedRevision ?? 0,
-					extensionVersion: "0.4.16",
+					extensionVersion: BRIDGE_VERSION,
 				});
 				const capabilityExpansion = capabilityExpansionRequired(
 					projectSync?.capabilityEnvelope ?? null,

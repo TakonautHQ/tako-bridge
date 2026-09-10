@@ -2,9 +2,11 @@ import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import {
 	createBridgePanelErrorWidget,
+	createBridgePanelLoginWidget,
 	createBridgePanelWidget,
 	type BridgePanelData,
 } from "../src/panel.js";
+import { BRIDGE_VERSION } from "../src/version.js";
 
 const theme = {
 	fg: (tone: string, text: string) =>
@@ -62,6 +64,24 @@ function expectFullWidth(lines: string[], width: number) {
 }
 
 describe("Tako Bridge responsive panel", () => {
+	it("shows the package version after the title in every panel state", () => {
+		const width = 72;
+		const headers = [
+			createBridgePanelWidget(panelData, theme).render(width)[0],
+			createBridgePanelLoginWidget(theme).render(width)[0],
+			createBridgePanelErrorWidget("Connection timed out", theme).render(
+				width,
+			)[0],
+		];
+
+		for (const header of headers) {
+			expect(stripTerminalSequences(header)).toContain(
+				`TAKO BRIDGE v${BRIDGE_VERSION}`,
+			);
+			expect(visibleWidth(header)).toBe(width);
+		}
+	});
+
 	it("uses a full-width three-column pulse layout on wide terminals", () => {
 		const width = 120;
 		const lines = render(width);
