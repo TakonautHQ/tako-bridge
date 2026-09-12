@@ -1,6 +1,6 @@
 # Tako Bridge
 
-Tako Bridge is Takonaut's open-source developer workflow extension for the [Pi agent harness](https://github.com/earendil-works/pi). It brings assigned Takonaut work, governed Project Context, repository verification, durable recovery, tests, and human-reviewed completion evidence into a local Pi session.
+Tako Bridge is Takonaut's open-source developer workflow extension for the [Pi agent harness](https://github.com/earendil-works/pi). It brings assigned Takonaut work, governed Project Context, repository verification, durable recovery, tests, human-reviewed completion evidence, and Tako Grill Work hierarchy planning into a local Pi session.
 
 Tako Bridge is interactive and bound to one signed-in Takonaut user. The unattended, organization-owned execution service is the separate [Tako Runner](https://github.com/TakonautHQ/tako-runner) project.
 
@@ -22,7 +22,7 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.4.17 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.4.18 -l
 ```
 
 Pi records the package in `.pi/settings.json` and installs it after the project is trusted. To intentionally load Tako Bridge in every Pi project, omit `-l`. If an older release is already installed globally, use `pi list`, remove the exact global source shown there with `pi remove SOURCE`, and then install it locally.
@@ -89,6 +89,7 @@ Human decisions remain in Takonaut's Review queue. Approval completes the govern
 | `/tako-tasks` | Search current assigned work by key, title, Project, Sprint, or Stage, then open the selected item in Takonaut. Sprint Projects show the active Sprint; Kanban Projects show pulled, unarchived board work. |
 | `/tako-panel` | Configure the persistent Tako Bridge panel above Pi's prompt editor. |
 | `/tako-standup` | Draft a Standup from the current Pi session and bounded Git activity, then open the reviewed draft in Takonaut. |
+| `/tako-grill [ITEM_ID\|ITEM_URL\|cancel SESSION_ID]` | Start, resume, or cancel a private governed interview that proposes the selected Work hierarchy item's immediate children. |
 
 ### Authorized Takonaut MCP tools
 
@@ -105,6 +106,20 @@ Public MCP tools are deny-by-default. Platform/operator functions, organization 
 On successful `/tako-login`, Bridge also removes `mcpServers.takonaut` from the current project's `.mcp.json` only when it is an exact HTTPS Takonaut personal-key entry. It never copies the new Bridge credential into that file, never removes unrelated MCP servers, and refuses unsafe or nonmatching files. Other saved Takonaut organization profiles remain available for organization switching.
 
 Creating a Task through the governed `tako_action` path still requires `tasks.create` on the selected Project and an active Sprint; Kanban Projects and Projects without an active Sprint are refused. Personal MCP-created Tasks default to the authenticated member as owner and retain the selected Stage's Track so later Stage moves resolve against the configured Delivery flow. Prepared actions expire after five minutes, are bound to the exact user, organization, device key, capability, and arguments, and are replay-safe across server workers.
+
+### Tako Grill
+
+When **Developer Agents** and **Tako Grill** are enabled for the active organization, `/tako-grill` starts or resumes one private planning session for a Work hierarchy parent. With no argument, Bridge asks for a Project key and parent. You may instead pass the parent's ID or Takonaut URL. The Project's configured hierarchy determines the target: Tako Grill proposes only immediate children, and proposes Tasks when the parent is at the lowest configured level. It never recurses automatically.
+
+Before the interview, Bridge enumerates every active repository linked to the Project and requires each one to be available through a verified local Git root or the caller's authenticated GitHub CLI. It resolves safe refs to exact lowercase commit SHAs, collects bounded evidence at those revisions, and shows a context-consent review. Tracked local diffs require a separate opt-in and are re-collected before consent is reused. Repository content is untrusted evidence and cannot authorize tools, change routing, or issue commands.
+
+The selected Pi model conducts the structured interview; this uses no Takonaut AI credits. The private resumable session covers goal, scope, dependencies, security and privacy, compatibility, repository impact, and success evidence. It stores structured questions, answers, accepted noncritical unknowns, and design decisions—not model reasoning. Repository bodies, local paths, clone URLs, credentials, tokens, prompts, and raw errors are excluded from lifecycle events and diagnostics.
+
+The proposal reviewer is interactive and server-paginated. You can edit supported fields and include or exclude actions before preparation. Bridge then prepares the exact current revision, displays the server-prepared preview and Decision Brief, and asks once for confirmation. The action expires after five minutes, is bound to the current user, organization, API key, session, proposal, and evidence manifest, and cannot be replayed. Login/profile changes, logout, reconnect, feature disable, and extension shutdown invalidate in-flight Grill work.
+
+Confirmed execution applies the complete reviewed batch atomically with an immutable Decision Brief version. New hierarchy items use the selected parent and configured next level. At the Task level, omitted placement defaults to Backlog and omitted assignment remains unassigned; reviewed Sprint, Track, Stage, team, and assignee fields require current permissions and valid Project scope. Grill updates or archives only unchanged Grill-managed children unless you explicitly re-adopt a changed item. Success returns direct links to the resulting children and may offer one child for another Grill, but never starts it automatically.
+
+Completed Decision Briefs are available as read-only version history on the parent item's Takonaut detail page. Cancelling with `/tako-grill cancel SESSION_ID` erases private questions, answers, and proposal content while retaining only bounded lifecycle metadata. If a prepared action is lost or expires, Bridge invalidates it server-side and returns the session to proposal review before anything can be applied.
 
 ### Pi status panel and Standup draft
 

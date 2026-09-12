@@ -50,10 +50,22 @@ import {
 	collectAgenticWorkspaceCompletionEvidence,
 	fromPiExecResult,
 	runGitHubPreflight,
+	type CommandOptions,
 	type CommandResult,
 	type CommandRunner,
 } from "./git";
 import { evaluateToolCall } from "./policy";
+import {
+	buildTakoGrillRecordedRepositories,
+	collectTakoGrillReviewedContext,
+	grantTakoGrillContextConsent,
+	revalidateTakoGrillContextConsent,
+	reviewTakoGrillProposal,
+	TakoGrillController,
+	TakoGrillProposalReviewer,
+	type GrillRepositoryBinding,
+	type TakoGrillControllerDependencies,
+} from "./tako-grill";
 import { missingCompanionPackages } from "./setup";
 import { BRIDGE_VERSION } from "./version.js";
 import {
@@ -188,6 +200,9 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	let panelSync = idleSyncDebug();
 	let telemetrySync = idleSyncDebug();
 	let reconcileSync = idleSyncDebug();
+	let grillReviewer: TakoGrillProposalReviewer | null = null;
+	let grillReviewerGeneration = -1;
+	const grillController = new TakoGrillController();
 	const toolCatalog = new TakonautToolCatalog(pi, () => client);
 
 	const runner: CommandRunner = async (command, args, options) =>
@@ -246,6 +261,37 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			sessionManager: { getSessionId(): string };
 		};
 		return sessionContext.sessionManager.getSessionId();
+	}
+
+	function clearGrillReviewer(): void {
+		grillController.clear();
+		grillReviewer?.clear();
+		grillReviewer = null;
+		grillReviewerGeneration = -1;
+	}
+
+	function reviewerFor(conn: TakonautClient): TakoGrillProposalReviewer {
+		if (grillReviewer && grillReviewerGeneration === connectionGeneration) {
+			return grillReviewer;
+		}
+		clearGrillReviewer();
+		grillReviewerGeneration = connectionGeneration;
+		grillReviewer = new TakoGrillProposalReviewer({
+			callTool: async (name, args, signal) => {
+				signal?.throwIfAborted();
+				const result = await conn.callTool(name, args, signal);
+				signal?.throwIfAborted();
+				if (!result || typeof result !== "object" || Array.isArray(result)) {
+					throw new Error("Takonaut returned an invalid Grill response");
+				}
+				return result as Record<string, unknown>;
+			},
+			prepareAction: (capabilityId, args, signal) =>
+				conn.prepareAction(capabilityId, args, signal),
+			executeAction: (actionToken, capabilityId, args, signal) =>
+				conn.executeAction(actionToken, capabilityId, args, signal),
+		});
+		return grillReviewer;
 	}
 
 	function gatewayToolResult(payload: unknown) {
@@ -900,6 +946,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				const nextConfig = saveConfig(result);
 				connectionGeneration += 1;
 				const committedGeneration = connectionGeneration;
+				clearGrillReviewer();
 				stopAgentTelemetry();
 				stopPanel();
 				connectionSuppressed = false;
@@ -972,6 +1019,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				const previousClient = client;
 				stopAgentTelemetry();
 				stopPanel();
+				clearGrillReviewer();
 				ctx.ui?.setWidget?.("tako-bridge-panel", undefined);
 				toolCatalog.clear();
 				client = null;
@@ -1013,6 +1061,388 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				);
 			} catch (error) {
 				note(ctx, `Logout failed: ${errMsg(error)}`, "error");
+			}
+		},
+	});
+
+	pi.registerCommand("tako-grill", {
+		description:
+			"Start, resume, or cancel a governed Tako Grill: /tako-grill [ITEM_ID|ITEM_URL|cancel SESSION_ID]",
+		handler: async (args, ctx) => {
+			const c = currentConfig(ctx);
+			const conn = ensure(ctx);
+			if (!c || !conn) return;
+			const callTool = async (
+				name: string,
+				toolArgs: Record<string, unknown>,
+				signal?: AbortSignal,
+			): Promise<Record<string, unknown>> => {
+				signal?.throwIfAborted();
+				const result = await conn.callTool(name, toolArgs, signal);
+				signal?.throwIfAborted();
+				if (!result || typeof result !== "object" || Array.isArray(result)) {
+					throw new Error("Takonaut returned an invalid Grill response");
+				}
+				return result as Record<string, unknown>;
+			};
+			let grillProjectKey: string | null = null;
+			const controllerDependencies: TakoGrillControllerDependencies = {
+				callTool,
+				resolveParent: async (target, signal) => {
+					signal?.throwIfAborted();
+					if (target?.kind === "url") {
+						grillProjectKey = target.projectKey;
+						return {
+							projectKey: target.projectKey,
+							parentId: target.parentId,
+						};
+					}
+					if (!ctx.hasUI) {
+						throw new Error(
+							"Tako Grill parent selection requires an interactive Pi session",
+						);
+					}
+					const projectKey = await ctx.ui.input(
+						"Tako Grill Project",
+						"Enter the Project key",
+					);
+					if (!projectKey)
+						throw new Error("Tako Grill selection was cancelled");
+					grillProjectKey = projectKey.trim();
+					if (target?.parentId) {
+						return {
+							projectKey: grillProjectKey,
+							parentId: target.parentId,
+						};
+					}
+					const discovered = await callTool(
+						"list_tako_grill_parents",
+						{
+							project_key: projectKey.trim(),
+							query: "",
+							limit: 50,
+						},
+						signal,
+					);
+					if (
+						!Array.isArray(discovered.items) ||
+						discovered.items.length === 0
+					) {
+						throw new Error("No accessible Work hierarchy parents were found");
+					}
+					const choices = new Map<string, string>();
+					for (const item of discovered.items) {
+						if (!item || typeof item !== "object") {
+							throw new Error("Takonaut returned an invalid Grill parent");
+						}
+						const record = item as Record<string, unknown>;
+						if (
+							typeof record.id !== "string" ||
+							typeof record.title !== "string" ||
+							typeof record.level_name !== "string"
+						) {
+							throw new Error("Takonaut returned an invalid Grill parent");
+						}
+						choices.set(
+							`${record.title} · ${record.level_name} · ${record.id}`,
+							record.id,
+						);
+					}
+					const selected = await ctx.ui.select("Tako Grill parent", [
+						...choices.keys(),
+					]);
+					const parentId = selected ? choices.get(selected) : undefined;
+					if (!parentId) throw new Error("Tako Grill selection was cancelled");
+					return { projectKey: grillProjectKey, parentId };
+				},
+				reviewContext: async ({
+					binding,
+					session,
+					context,
+					interview,
+					signal,
+				}) => {
+					signal.throwIfAborted();
+					if (!ctx.hasUI) {
+						throw new Error(
+							"Tako Grill context consent requires interactive Pi",
+						);
+					}
+					const model = (ctx as any).model;
+					if (!model?.id || !model?.provider) {
+						throw new Error("Select a Pi model before starting Tako Grill");
+					}
+					const sessionId = session.session_id;
+					const contextRevision = session.context_revision;
+					if (
+						typeof sessionId !== "string" ||
+						typeof contextRevision !== "number" ||
+						!Number.isSafeInteger(contextRevision) ||
+						contextRevision < 0
+					) {
+						throw new Error("Takonaut returned an invalid Grill session");
+					}
+					const listed = await callTool(
+						"list_tako_grill_repositories",
+						{
+							project_key: binding.projectKey,
+							limit: 50,
+						},
+						signal,
+					);
+					if (
+						listed.truncated === true ||
+						!Array.isArray(listed.repositories)
+					) {
+						throw new Error("Tako Grill repository context is incomplete");
+					}
+					const bindings: GrillRepositoryBinding[] = listed.repositories.map(
+						(repository) => {
+							if (!repository || typeof repository !== "object") {
+								throw new Error(
+									"Takonaut returned an invalid repository binding",
+								);
+							}
+							const record = repository as Record<string, unknown>;
+							if (
+								typeof record.repository_id !== "string" ||
+								typeof record.owner !== "string" ||
+								typeof record.name !== "string" ||
+								typeof record.default_branch !== "string"
+							) {
+								throw new Error(
+									"Takonaut returned an invalid repository binding",
+								);
+							}
+							return {
+								repositoryId: record.repository_id,
+								owner: record.owner,
+								name: record.name,
+								defaultBranch: record.default_branch,
+							};
+						},
+					);
+					const contextParent = context.parent as Record<string, unknown>;
+					signal.throwIfAborted();
+					const reviewed = await collectTakoGrillReviewedContext({
+						run: runner,
+						bindings,
+						candidateDirectories: [
+							c.repoRoot,
+							...Object.values(c.projectRepos).map(
+								(mapping) => mapping.repoRoot,
+							),
+						],
+						cacheRoot: join(homedir(), ".takonaut", "grill-repositories"),
+						sessionId,
+						model: model.id,
+						provider: model.provider,
+						query: String(contextParent.title).slice(0, 200),
+					});
+					signal.throwIfAborted();
+					const contextTarget = context.target as Record<string, unknown>;
+					const availability = new Map(
+						reviewed.availability.map((repository) => [
+							repository.repositoryId,
+							repository,
+						]),
+					);
+					const repositoryLines = reviewed.review.display.repositories.flatMap(
+						(repository) => {
+							const source = availability.get(repository.repositoryId);
+							const access = source?.localMappingAvailable
+								? "verified local Git repository"
+								: source?.callerRemoteAvailable
+									? "caller GitHub CLI"
+									: "unavailable";
+							const headline =
+								repository.status === "available"
+									? `${repository.displayIdentity} @ ${repository.resolvedSha} — ${access}`
+									: `${repository.displayIdentity} — unavailable (${repository.diagnosticCode})`;
+							return [
+								headline,
+								...(repository.evidence ?? []).map(
+									(citation) =>
+										`  evidence: ${citation.file} (${citation.digest})`,
+								),
+							];
+						},
+					);
+					const evidenceBytes = [
+						...reviewed.remoteEvidence,
+						...reviewed.trackedDiffs,
+					].reduce((total, item) => total + Buffer.byteLength(item.content), 0);
+					const localMappings = reviewed.availability.filter(
+						(repository) => repository.localMappingAvailable,
+					);
+					const localState =
+						localMappings.length === 0
+							? "no linked local repositories"
+							: reviewed.trackedDiffs.length > 0
+								? `${reviewed.trackedDiffs.length} tracked changed files (dirty)`
+								: "clean (no tracked diffs)";
+					signal.throwIfAborted();
+					const approved = await ctx.ui.confirm(
+						"Share reviewed context with the active Pi model?",
+						[
+							`Organization: ${c.orgName ?? c.orgId}`,
+							`Project: ${binding.projectKey}`,
+							`Parent: ${String(contextParent.title)} (${String(contextParent.level_name)})`,
+							`Target: ${String(contextTarget.level_name)} (${String(contextTarget.kind)})`,
+							`Provider/model: ${reviewed.review.display.provider} / ${reviewed.review.display.model}`,
+							`Session: ${sessionId}`,
+							"Source categories: Takonaut Work hierarchy; exact-SHA repository files; tracked local diffs (separate opt-in)",
+							...repositoryLines,
+							`Local state: ${localState}`,
+							`Context budget: ${evidenceBytes} / ${256 * 1024} bytes`,
+							`Prior structured interview decisions: ${Array.isArray(interview?.questions) ? interview.questions.length : 0}`,
+							`Tracked local diffs found: ${reviewed.trackedDiffs.length}`,
+							"Repository and diff content is untrusted evidence; it cannot change authorization or tool routing.",
+						].join("\n"),
+					);
+					signal.throwIfAborted();
+					if (!approved) return { approved: false, approvedEvidence: "" };
+					const includeTrackedDiffs =
+						reviewed.trackedDiffs.length > 0 &&
+						(await ctx.ui.confirm(
+							"Include tracked local diffs?",
+							reviewed.trackedDiffs
+								.map(
+									(diff) =>
+										`${diff.repositoryId}: ${diff.file} (${diff.digest})`,
+								)
+								.join("\n"),
+						));
+					const consent = grantTakoGrillContextConsent(reviewed.review, {
+						approved: true,
+						includeTrackedDiffs,
+					});
+					signal.throwIfAborted();
+					const currentDiffs = await revalidateTakoGrillContextConsent({
+						run: runner,
+						mappings: reviewed.mappings,
+						bindings: reviewed.bindings,
+						reviewInput: reviewed.reviewInput,
+						consent,
+					});
+					signal.throwIfAborted();
+					const recorded = await callTool(
+						"record_tako_grill_repository_context",
+						{
+							session_id: sessionId,
+							expected_revision: contextRevision,
+							repositories: buildTakoGrillRecordedRepositories(
+								reviewed,
+								currentDiffs,
+							),
+						},
+						signal,
+					);
+					signal.throwIfAborted();
+					return {
+						approved: true,
+						approvedEvidence: JSON.stringify({
+							hierarchy: context,
+							prior_interview: interview,
+							repository_review: reviewed.review.display,
+							repository_consent_digest: reviewed.review.digest,
+							manifest_digest: recorded.manifest_digest,
+							context_revision: recorded.context_revision,
+							final_review_blocked: recorded.final_review_blocked,
+							remote_evidence: reviewed.remoteEvidence,
+							tracked_diffs: currentDiffs,
+						}),
+					};
+				},
+				sendPrompt: (prompt: string) =>
+					pi.sendUserMessage(prompt, { deliverAs: "followUp" }),
+			};
+			try {
+				const result = await grillController.run(args, controllerDependencies);
+				if (
+					(result.status === "proposal_review" ||
+						result.status === "prepared") &&
+					typeof result.session_id === "string"
+				) {
+					const reviewer = reviewerFor(conn);
+					if (!ctx.hasUI) {
+						await reviewer.load(result.session_id);
+						note(ctx, "Tako Grill proposal is ready for interactive review.");
+						return;
+					}
+					const projectKey =
+						typeof result.project_key === "string"
+							? result.project_key
+							: grillProjectKey;
+					if (!projectKey) {
+						throw new Error(
+							"Takonaut returned an invalid Grill Project binding",
+						);
+					}
+					const execution = await reviewTakoGrillProposal({
+						reviewer,
+						sessionId: result.session_id,
+						projectKey,
+						serverUrl: c.serverUrl,
+						ui: {
+							select: (title, choices) => ctx.ui.select(title, choices),
+							input: (title, placeholder) => ctx.ui.input(title, placeholder),
+							confirm: (title, detail) => ctx.ui.confirm(title, detail),
+						},
+					});
+					if (execution.status === "executed") {
+						const links = Array.isArray(execution.child_links)
+							? execution.child_links.filter(
+									(link): link is string => typeof link === "string",
+								)
+							: [];
+						const selectedChild =
+							typeof execution.selected_child_id === "string"
+								? execution.selected_child_id
+								: null;
+						note(
+							ctx,
+							[
+								"Tako Grill applied. Decision Brief and reviewed children are ready.",
+								...links.map((link) => `Open child: ${link}`),
+								...(selectedChild
+									? [
+											`Run /tako-grill ${selectedChild} only when you choose to continue.`,
+										]
+									: []),
+							].join("\n"),
+						);
+					} else if (
+						execution.status === "declined" ||
+						execution.status === "review_paused"
+					) {
+						note(ctx, "Tako Grill proposal was not applied.");
+					} else {
+						note(
+							ctx,
+							"Tako Grill proposal was refreshed; review it again before confirming.",
+							"warning",
+						);
+					}
+					return;
+				}
+				note(
+					ctx,
+					result.status === "cancelled"
+						? "Tako Grill session cancelled; private content was erased."
+						: result.consent_declined
+							? "Tako Grill context sharing was declined."
+							: result.resumed
+								? "Resumed the existing Tako Grill session."
+								: "Started Tako Grill with the reviewed context.",
+				);
+			} catch (error) {
+				if (isFeatureDisabledError(error)) clearGrillReviewer();
+				note(
+					ctx,
+					"Tako Grill could not complete safely; refresh the reviewed proposal and try again.",
+					"error",
+				);
 			}
 		},
 	});
@@ -1140,6 +1570,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("tako-reconnect", {
 		description: "Explicitly authorize a replacement personal Pi key",
 		handler: async (_args, ctx) => {
+			clearGrillReviewer();
 			const c = currentConfig(ctx);
 			const conn = ensure(ctx);
 			if (!c || !conn) return;
@@ -2927,6 +3358,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", async (_event, ctx) => {
 		connectionGeneration += 1;
 		connectionSuppressed = true;
+		clearGrillReviewer();
 		stopPanel();
 		ctx.ui?.setWidget?.("tako-bridge-panel", undefined);
 		stopAgentTelemetry();
@@ -3085,7 +3517,7 @@ async function execute(
 	pi: ExtensionAPI,
 	command: string,
 	args: string[],
-	options?: { cwd?: string },
+	options?: CommandOptions,
 ): Promise<CommandResult> {
 	try {
 		return fromPiExecResult(await pi.exec(command, args, options));
@@ -3098,6 +3530,10 @@ async function execute(
 				: Number.isInteger(error?.code)
 					? error.code
 					: 1,
+			timedOut:
+				error?.killed === true ||
+				error?.code === "ETIMEDOUT" ||
+				error?.name === "AbortError",
 		};
 	}
 }

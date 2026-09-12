@@ -390,20 +390,27 @@ export class TakonautClient {
 		name: string,
 		args: Record<string, unknown>,
 		timeoutMs?: number,
+		signal?: AbortSignal,
 	): Promise<any> {
+		signal?.throwIfAborted();
 		await this.ensure();
+		signal?.throwIfAborted();
 		const request = { name, arguments: args };
-		return timeoutMs === undefined
+		return timeoutMs === undefined && signal === undefined
 			? this.client.callTool(request)
-			: this.client.callTool(request, undefined, { timeout: timeoutMs });
+			: this.client.callTool(request, undefined, {
+					...(timeoutMs === undefined ? {} : { timeout: timeoutMs }),
+					...(signal === undefined ? {} : { signal }),
+				});
 	}
 
 	private async call(
 		name: string,
 		args: Record<string, unknown>,
 		timeoutMs?: number,
+		signal?: AbortSignal,
 	): Promise<any> {
-		return parseToolJson(await this.requestTool(name, args, timeoutMs));
+		return parseToolJson(await this.requestTool(name, args, timeoutMs, signal));
 	}
 
 	async listTools(): Promise<TakonautMcpTool[]> {
@@ -420,6 +427,7 @@ export class TakonautClient {
 	async callTool(
 		name: string,
 		args: Record<string, unknown>,
+		signal?: AbortSignal,
 	): Promise<unknown> {
 		if (!CATALOG_TOOL_NAME.test(name)) {
 			throw new Error("Invalid Takonaut MCP tool name.");
@@ -428,7 +436,9 @@ export class TakonautClient {
 		if (byteLength(argumentsJson) > GENERIC_TOOL_IO_LIMIT_BYTES) {
 			throw new Error("Takonaut MCP tool arguments exceed the 8 KB limit.");
 		}
-		const result = parseGenericToolResult(await this.requestTool(name, args));
+		const result = parseGenericToolResult(
+			await this.requestTool(name, args, undefined, signal),
+		);
 		const resultJson = JSON.stringify(result);
 		if (byteLength(resultJson) > GENERIC_TOOL_IO_LIMIT_BYTES) {
 			return {
@@ -468,11 +478,13 @@ export class TakonautClient {
 	prepareAction(
 		capabilityId: string,
 		args: Record<string, unknown>,
+		signal?: AbortSignal,
 	): Promise<PreparedPersonalAction> {
 		return this.call(
 			"bridge_prepare_action",
 			{ capability_id: capabilityId, arguments: args },
 			10_000,
+			signal,
 		);
 	}
 
@@ -480,6 +492,7 @@ export class TakonautClient {
 		actionToken: string,
 		capabilityId: string,
 		args: Record<string, unknown>,
+		signal?: AbortSignal,
 	): Promise<ExecutedPersonalAction> {
 		return this.call(
 			"bridge_execute_action",
@@ -490,6 +503,7 @@ export class TakonautClient {
 				confirmed: true,
 			},
 			10_000,
+			signal,
 		);
 	}
 

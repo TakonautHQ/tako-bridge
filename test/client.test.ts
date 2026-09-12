@@ -100,6 +100,34 @@ describe("TakonautClient transport", () => {
 		expect(mocks.callTool).toHaveBeenCalledTimes(1);
 	});
 
+	it("forwards lifecycle cancellation to in-flight MCP mutations", async () => {
+		const client = new TakonautClient(cfg);
+		const controller = new AbortController();
+
+		const prepareWithSignal = client.prepareAction.bind(client) as (
+			capabilityId: string,
+			args: Record<string, unknown>,
+			signal?: AbortSignal,
+		) => Promise<unknown>;
+		await prepareWithSignal(
+			"grill.execute",
+			{ session_id: "opaque" },
+			controller.signal,
+		);
+
+		expect(mocks.callTool).toHaveBeenCalledWith(
+			{
+				name: "bridge_prepare_action",
+				arguments: {
+					capability_id: "grill.execute",
+					arguments: { session_id: "opaque" },
+				},
+			},
+			undefined,
+			{ timeout: 10_000, signal: controller.signal },
+		);
+	});
+
 	it("preserves successful plain-text MCP tool results", async () => {
 		mocks.callTool.mockResolvedValue({
 			content: [{ type: "text", text: "Standup summary: all submitted." }],

@@ -8,10 +8,12 @@ export interface CommandResult {
 	stdout: string;
 	stderr: string;
 	exitCode: number;
+	timedOut?: boolean;
 }
 
 export interface CommandOptions {
 	cwd?: string;
+	timeout?: number;
 }
 
 export type CommandRunner = (
@@ -32,6 +34,7 @@ export function fromPiExecResult(result: {
 		stdout: result.stdout ?? "",
 		stderr: result.stderr ?? "",
 		exitCode: result.exitCode ?? result.code ?? 0,
+		...(result.killed === true ? { timedOut: true } : {}),
 	};
 }
 

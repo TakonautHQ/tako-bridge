@@ -640,6 +640,289 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		]);
 	});
 
+	it("registers /tako-grill and routes cancellation through its governed tool", async () => {
+		const { commands } = setup();
+		const sessionId = "5228dbb1-60a7-4ea8-aa12-4b6876df7894";
+		mocks.callTool.mockResolvedValue({
+			session_id: sessionId,
+			status: "cancelled",
+		});
+
+		expect(commands.has("tako-grill")).toBe(true);
+		await commands.get("tako-grill")?.(`cancel ${sessionId}`, commandContext());
+
+		expect(mocks.callTool).toHaveBeenCalledWith(
+			"cancel_tako_grill_session",
+			{ session_id: sessionId },
+			expect.any(AbortSignal),
+		);
+	});
+
+	it("uses focused Work hierarchy discovery for the no-argument Grill picker", async () => {
+		const { commands, pi } = setup();
+		const sessionId = "5228dbb1-60a7-4ea8-aa12-4b6876df7894";
+		const parentId = "876540a9-670a-47df-bc7b-c8a9253e6b24";
+		mocks.callTool.mockImplementation(
+			async (name: string, args: Record<string, unknown>) => {
+				if (name === "list_tako_grill_parents") {
+					expect(args).toEqual({ project_key: "ATL", query: "", limit: 50 });
+					return {
+						project_key: "ATL",
+						items: [
+							{
+								id: parentId,
+								title: "Checkout",
+								level_name: "Brief",
+							},
+						],
+						truncated: false,
+					};
+				}
+				if (name === "start_tako_grill_session") {
+					expect(args).toEqual({
+						project_key: "ATL",
+						parent_work_item_id: parentId,
+					});
+					return {
+						session_id: sessionId,
+						status: "context_review",
+						context_revision: 0,
+					};
+				}
+				if (name === "get_tako_grill_context") {
+					return {
+						parent: { id: parentId, title: "Checkout", level_name: "Brief" },
+						target: { kind: "work_item", level_name: "Story" },
+					};
+				}
+				if (name === "list_tako_grill_repositories") {
+					return { project_key: "ATL", repositories: [], truncated: false };
+				}
+				throw new Error(`unexpected tool: ${name}`);
+			},
+		);
+		const ctx = {
+			...commandContext(),
+			model: { id: "test-model", provider: "test-provider" },
+		};
+		ctx.ui.input.mockResolvedValueOnce("ATL");
+		ctx.ui.select.mockResolvedValueOnce(`Checkout · Brief · ${parentId}`);
+		ctx.ui.confirm.mockResolvedValueOnce(false);
+
+		await commands.get("tako-grill")?.("", ctx);
+
+		expect(ctx.ui.select).toHaveBeenCalledWith("Tako Grill parent", [
+			`Checkout · Brief · ${parentId}`,
+		]);
+		expect(mocks.callTool.mock.calls.map(([name]) => name)).toEqual([
+			"list_tako_grill_parents",
+			"start_tako_grill_session",
+			"get_tako_grill_context",
+			"list_tako_grill_repositories",
+		]);
+		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+	});
+
+	it("records the reviewed complete repository manifest before starting the Grill prompt", async () => {
+		const { commands, pi } = setup();
+		const sessionId = "5228dbb1-60a7-4ea8-aa12-4b6876df7894";
+		const parentId = "876540a9-670a-47df-bc7b-c8a9253e6b24";
+		mocks.callTool.mockImplementation(
+			async (name: string, args: Record<string, unknown>) => {
+				if (name === "start_tako_grill_session") {
+					return {
+						session_id: sessionId,
+						status: "context_review",
+						context_revision: 0,
+						resumed: false,
+					};
+				}
+				if (name === "get_tako_grill_context") {
+					return {
+						parent: { id: parentId, title: "Checkout", level_name: "Brief" },
+						target: { kind: "work_item", level_name: "Story" },
+					};
+				}
+				if (name === "list_tako_grill_repositories") {
+					return { project_key: "ATL", repositories: [], truncated: false };
+				}
+				if (name === "record_tako_grill_repository_context") {
+					expect(args).toEqual({
+						session_id: sessionId,
+						expected_revision: 0,
+						repositories: [],
+					});
+					return {
+						session_id: sessionId,
+						context_revision: 1,
+						manifest_digest: "a".repeat(64),
+						final_review_blocked: false,
+					};
+				}
+				throw new Error(`unexpected tool: ${name}`);
+			},
+		);
+		const ctx = {
+			...commandContext(),
+			model: { id: "test-model", provider: "test-provider" },
+		};
+
+		await commands.get("tako-grill")?.(
+			`https://takonaut.app/projects/ATL/work-items/${parentId}`,
+			ctx,
+		);
+
+		expect(ctx.ui.confirm).toHaveBeenCalledOnce();
+		const [, consentMessage] = ctx.ui.confirm.mock.calls[0];
+		expect(consentMessage).toContain("Organization: org-123");
+		expect(consentMessage).toContain("Project: ATL");
+		expect(consentMessage).toContain("Parent: Checkout (Brief)");
+		expect(consentMessage).toContain("Target: Story (work_item)");
+		expect(consentMessage).toContain("Source categories:");
+		expect(consentMessage).toContain("Context budget:");
+		expect(consentMessage).toContain("Local state:");
+		expect(mocks.callTool.mock.calls.map(([name]) => name)).toEqual([
+			"start_tako_grill_session",
+			"get_tako_grill_context",
+			"list_tako_grill_repositories",
+			"record_tako_grill_repository_context",
+		]);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+		const [prompt] = pi.sendUserMessage.mock.calls[0];
+		expect(prompt).toContain('"manifest_digest":"' + "a".repeat(64));
+	});
+
+	it("reviews a resumed proposal through the extension-lifetime controller and clears it on logout", async () => {
+		const { commands } = setup();
+		const sessionId = "5228dbb1-60a7-4ea8-aa12-4b6876df7894";
+		const parentId = "876540a9-670a-47df-bc7b-c8a9253e6b24";
+		mocks.callTool.mockImplementation(async (name: string) => {
+			if (name === "start_tako_grill_session")
+				return {
+					session_id: sessionId,
+					status: "proposal_review",
+					resumed: true,
+				};
+			if (name === "get_tako_grill_proposal")
+				return {
+					session_id: sessionId,
+					status: "proposal_review",
+					proposal_revision: 1,
+					proposal_digest: "a".repeat(64),
+					summary: { intent: "Ship", desired_outcome: "Ready child" },
+					accepted_unknowns: [],
+					actions: [
+						{
+							id: "add",
+							kind: "add",
+							included: true,
+							title: "Child",
+							fields: {},
+							rationale: "Reviewed",
+							protected: false,
+						},
+					],
+					total_count: 1,
+					truncated: false,
+				};
+			if (name === "validate_tako_grill_proposal_for_preparation")
+				return { preparation_allowed: true };
+			throw new Error(`unexpected tool ${name}`);
+		});
+		mocks.prepareAction.mockResolvedValue({
+			action_token: "token",
+			preview: {
+				action: "Execute Tako Grill proposal",
+				session_id: sessionId,
+				proposal_revision: 1,
+				mutation_count: 1,
+				kept_count: 0,
+				adoption_count: 0,
+				target_kind: "work_item",
+				target_level_name: "Story",
+			},
+		});
+		mocks.executeAction.mockResolvedValue({
+			status: "executed",
+			result: { target_kind: "work_item", item_ids: [parentId] },
+		});
+		const ctx = {
+			...commandContext(),
+			model: { id: "test-model", provider: "test-provider" },
+		};
+		ctx.ui.confirm.mockResolvedValueOnce(true);
+		const childLink = `https://takonaut.test/projects/ATL/work-items/${parentId}`;
+		ctx.ui.select
+			.mockResolvedValueOnce("Apply reviewed proposal")
+			.mockResolvedValueOnce(childLink);
+
+		await commands.get("tako-grill")?.(
+			`https://takonaut.app/projects/ATL/work-items/${parentId}`,
+			ctx,
+		);
+		await commands.get("tako-logout")?.("", ctx);
+
+		expect(mocks.prepareAction).toHaveBeenCalledWith(
+			"grill.execute",
+			{
+				session_id: sessionId,
+				proposal_revision: 1,
+				proposal_digest: "a".repeat(64),
+			},
+			expect.any(AbortSignal),
+		);
+		expect(mocks.executeAction).toHaveBeenCalledOnce();
+		expect(ctx.ui.confirm).toHaveBeenCalledWith(
+			"Apply reviewed Tako Grill proposal?",
+			expect.stringContaining('"mutation_count": 1'),
+		);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(
+			expect.stringContaining(`Open child: ${childLink}`),
+			"info",
+		);
+		expect(mocks.callTool.mock.calls.map(([name]) => name)).not.toContain(
+			"get_tako_grill_context",
+		);
+		expect(
+			mocks.callTool.mock.calls.filter(
+				([name]) => name === "start_tako_grill_session",
+			),
+		).toHaveLength(1);
+	});
+
+	it("drops an in-flight Grill result when the extension shuts down", async () => {
+		const { commands, events, pi } = setup();
+		const sessionId = "5228dbb1-60a7-4ea8-aa12-4b6876df7894";
+		const parentId = "876540a9-670a-47df-bc7b-c8a9253e6b24";
+		let resolveStart!: (value: Record<string, unknown>) => void;
+		mocks.callTool.mockImplementation(
+			() =>
+				new Promise<Record<string, unknown>>((resolve) => {
+					resolveStart = resolve;
+				}),
+		);
+		const ctx = {
+			...commandContext(),
+			model: { id: "test-model", provider: "test-provider" },
+		};
+
+		const operation = commands.get("tako-grill")?.(
+			`https://takonaut.app/projects/ATL/work-items/${parentId}`,
+			ctx,
+		);
+		await vi.waitFor(() => expect(mocks.callTool).toHaveBeenCalledOnce());
+		await events.get("session_shutdown")?.({ reason: "quit" }, ctx);
+		resolveStart({
+			session_id: sessionId,
+			status: "context_review",
+			resumed: false,
+		});
+		await operation;
+
+		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+		expect(mocks.callTool).toHaveBeenCalledTimes(1);
+	});
+
 	it("registers the authenticated MCP catalog at session start", async () => {
 		mocks.listTools.mockResolvedValue([
 			{
@@ -1485,7 +1768,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			clientId: "client-1",
 			sessionId: "pi-session-1",
 			sessionLabel: expect.stringContaining("PAY-142"),
-			extensionVersion: "0.4.17",
+			extensionVersion: "0.4.18",
 			manifestSchemaVersion: 2,
 			baseRefOverrides: [],
 			idempotencyKey: expect.stringMatching(
