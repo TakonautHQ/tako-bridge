@@ -1,6 +1,12 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { StartableTask } from "./client.js";
 import { BRIDGE_VERSION } from "./version.js";
+import {
+	isDoneTask,
+	PANEL_TASK_FILTER_LABELS,
+	selectPanelTasks,
+	type PanelTaskFilter,
+} from "./panel-tasks.js";
 
 const WIDE_PANEL_MIN_WIDTH = 100;
 const MEDIUM_PANEL_MIN_WIDTH = 72;
@@ -57,6 +63,7 @@ export interface BridgePanelData {
 	standupStatus: "pending" | "submitted" | null;
 	tasks: StartableTask[];
 	taskLimit: number;
+	taskFilter?: PanelTaskFilter;
 	debug?: BridgePanelDebugData;
 }
 
@@ -240,6 +247,7 @@ function buildSections(
 	data: BridgePanelData,
 	ready: number,
 	blocked: number,
+	done: number,
 ): PanelSection[] {
 	const sections: PanelSection[] = [];
 	if (data.showRun) {
@@ -272,17 +280,24 @@ function buildSections(
 		const stageSummary = [...stageCounts]
 			.map(([stageName, count]) => `${stageName} ${count}`)
 			.join(" · ");
+		const filter = data.taskFilter ?? "all";
 		sections.push({
-			label: "WORK",
+			label:
+				filter === "all"
+					? "WORK"
+					: `WORK · ${PANEL_TASK_FILTER_LABELS[filter]}`,
 			weight: 35,
 			primary: [
 				{ text: `${ready} ready`, tone: ready ? "success" : "muted" },
 				{ text: " · ", tone: "dim" },
 				{ text: `${blocked} blocked`, tone: blocked ? "warning" : "muted" },
+				...(done ? [{ text: ` · ${done} done`, tone: "muted" as const }] : []),
 			],
 			secondary: [
 				{
-					text: stageSummary || "No current work",
+					text:
+						stageSummary ||
+						(filter === "all" ? "No current work" : "No matching tasks"),
 					tone: stageSummary ? "text" : "muted",
 				},
 			],
@@ -415,7 +430,9 @@ function nextAction(data: BridgePanelData): {
 			command: [{ text: "/tako-status ", tone: "accent", strong: true }],
 		};
 	}
-	const readyTask = data.tasks.find((task) => task.startability.startable);
+	const readyTask = data.tasks.find(
+		(task) => !isDoneTask(task) && task.startability.startable,
+	);
 	if (data.showTasks && readyTask) {
 		return {
 			message: [{ text: ` Start ${readyTask.task_key}`, tone: "text" }],
@@ -441,17 +458,23 @@ function nextAction(data: BridgePanelData): {
 }
 
 export function createBridgePanelWidget(
-	data: BridgePanelData,
+	input: BridgePanelData,
 	theme: PanelTheme,
 ) {
+	const data = {
+		...input,
+		tasks: selectPanelTasks(input.tasks, input.taskFilter),
+	};
+	const filteredOut = input.tasks.length - data.tasks.length;
 	return {
 		render(width: number): string[] {
 			const resolvedWidth = panelWidth(width);
+			const done = data.tasks.filter(isDoneTask).length;
 			const ready = data.tasks.filter(
-				(task) => task.startability.startable,
+				(task) => !isDoneTask(task) && task.startability.startable,
 			).length;
-			const blocked = data.tasks.length - ready;
-			const sections = buildSections(data, ready, blocked);
+			const blocked = data.tasks.length - ready - done;
+			const sections = buildSections(data, ready, blocked, done);
 			const lines = [
 				framedRule(theme, resolvedWidth, "╭", "╮", panelTitleSegments(), [
 					{ text: "● LIVE", tone: "success", strong: true },
@@ -492,16 +515,17 @@ export function createBridgePanelWidget(
 
 			if (data.showTasks) {
 				for (const task of data.tasks.slice(0, data.taskLimit)) {
+					const completed = isDoneTask(task);
 					const startable = task.startability.startable;
 					lines.push(
 						framedLine(theme, resolvedWidth, [
 							{ text: " ", tone: "borderMuted" },
 							{
-								text: startable ? "◆ " : "◇ ",
-								tone: startable ? "success" : "warning",
+								text: completed ? "✓ " : startable ? "◆ " : "◇ ",
+								tone: completed ? "muted" : startable ? "success" : "warning",
 							},
 							{ text: `${task.task_key}  `, tone: "accent", strong: true },
-							{ text: task.task_title, tone: "text" },
+							{ text: task.task_title, tone: completed ? "muted" : "text" },
 							{
 								text: task.stage_name ? ` · ${task.stage_name}` : "",
 								tone: "muted",
@@ -515,8 +539,12 @@ export function createBridgePanelWidget(
 				lines.push(...renderDebugBlock(theme, resolvedWidth, data.debug));
 			}
 
-			const hiddenTasks = Math.max(0, data.tasks.length - data.taskLimit);
-			const footerPrefix = hiddenTasks ? `+${hiddenTasks} more · ` : "";
+			const hiddenTasks = data.showTasks
+				? Math.max(0, data.tasks.length - data.taskLimit)
+				: 0;
+			const footerPrefix =
+				(hiddenTasks ? `+${hiddenTasks} more · ` : "") +
+				(data.showTasks && filteredOut ? `${filteredOut} filtered · ` : "");
 			lines.push(
 				framedRule(
 					theme,

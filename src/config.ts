@@ -18,6 +18,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { bridgeServerUrl } from "./server-url.js";
+import { PANEL_TASK_FILTERS, type PanelTaskFilter } from "./panel-tasks.js";
 
 export interface ProjectRepoMapping {
 	projectId: string;
@@ -33,6 +34,7 @@ export interface PanelSettings {
 	showStandup: boolean;
 	debug: boolean;
 	taskLimit: 1 | 3 | 5 | 10;
+	taskFilter: PanelTaskFilter;
 	refreshSeconds: 0 | 15 | 30 | 60;
 	standupProjectKey?: string;
 }
@@ -44,6 +46,7 @@ export const DEFAULT_PANEL_SETTINGS: PanelSettings = {
 	showStandup: true,
 	debug: false,
 	taskLimit: 3,
+	taskFilter: "all",
 	refreshSeconds: 30,
 };
 
@@ -114,6 +117,9 @@ function normalizedPanelSettings(
 	const refreshSeconds = [0, 15, 30, 60].includes(Number(value?.refreshSeconds))
 		? (Number(value?.refreshSeconds) as PanelSettings["refreshSeconds"])
 		: DEFAULT_PANEL_SETTINGS.refreshSeconds;
+	const taskFilter =
+		PANEL_TASK_FILTERS.find((filter) => filter === value?.taskFilter) ??
+		DEFAULT_PANEL_SETTINGS.taskFilter;
 	const standupProjectKey = value?.standupProjectKey?.trim().toUpperCase();
 	return {
 		visible: value?.visible ?? DEFAULT_PANEL_SETTINGS.visible,
@@ -122,6 +128,7 @@ function normalizedPanelSettings(
 		showStandup: value?.showStandup ?? DEFAULT_PANEL_SETTINGS.showStandup,
 		debug: value?.debug ?? DEFAULT_PANEL_SETTINGS.debug,
 		taskLimit,
+		taskFilter,
 		refreshSeconds,
 		...(standupProjectKey ? { standupProjectKey } : {}),
 	};
@@ -497,6 +504,11 @@ export function loadConfigFromFiles(
 		env?.orgId ?? process.env.TAKONAUT_ORG_ID ?? credentials?.activeOrgId;
 	const profile = env ?? (orgId ? credentials?.profiles?.[orgId] : undefined);
 	if (!profile) return null;
+	if (typeof profile.orgId !== "string" || !profile.orgId.trim()) {
+		throw new Error(
+			"Tako Bridge credentials are missing a valid organization ID. Run /tako-login to reconnect.",
+		);
+	}
 	bridgeServerUrl(profile.serverUrl, "Takonaut MCP URL");
 	return {
 		serverUrl: profile.serverUrl,

@@ -60,6 +60,29 @@ describe("secure Bridge profiles", () => {
 		expect(statSync(credentialsPath).mode & 0o777).toBe(0o600);
 	});
 
+	it.each([undefined, null, "", "   ", 42])(
+		"rejects a saved profile with missing or invalid orgId %s and supports login recovery",
+		(orgId) => {
+			saveConfig(CREDS, path);
+			const malformed = JSON.stringify({
+				version: 2,
+				activeOrgId: CREDS.orgId,
+				profiles: { [CREDS.orgId]: { ...CREDS, orgId } },
+			});
+			writeFileSync(credentialsPath, malformed, { mode: 0o600 });
+
+			expect(() => loadConfigFromFiles(path, credentialsPath)).toThrow(
+				"Tako Bridge credentials are missing a valid organization ID. Run /tako-login to reconnect.",
+			);
+			expect(readFileSync(credentialsPath, "utf-8")).toBe(malformed);
+			// Login can replace the broken profile without first loading it.
+			saveConfig(CREDS, path);
+			expect(loadConfigFromFiles(path, credentialsPath)?.orgId).toBe(
+				CREDS.orgId,
+			);
+		},
+	);
+
 	it("restores the bridge file when credential persistence fails", () => {
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 		const original = '{"version":2,"repoRoot":"/work/original"}\n';
@@ -175,6 +198,7 @@ describe("secure Bridge profiles", () => {
 			showStandup: true,
 			debug: false,
 			taskLimit: 3,
+			taskFilter: "all",
 			refreshSeconds: 30,
 		});
 
@@ -185,6 +209,7 @@ describe("secure Bridge profiles", () => {
 			showStandup: true,
 			debug: true,
 			taskLimit: 5 as const,
+			taskFilter: "open" as const,
 			refreshSeconds: 60 as const,
 			standupProjectKey: "PAY",
 		};
@@ -197,6 +222,7 @@ describe("secure Bridge profiles", () => {
 			showStandup: true,
 			debug: true,
 			taskLimit: 5,
+			taskFilter: "open",
 			refreshSeconds: 60,
 			standupProjectKey: "PAY",
 		});
@@ -209,11 +235,35 @@ describe("secure Bridge profiles", () => {
 				showStandup: true,
 				debug: true,
 				taskLimit: 5,
+				taskFilter: "open",
 				refreshSeconds: 60,
 				standupProjectKey: "PAY",
 			},
 		});
 	});
+
+	it.each([undefined, "unknown", null, 42, "toString"])(
+		"defaults missing or invalid task filter %s to All",
+		(taskFilter) => {
+			mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+			writeFileSync(
+				path,
+				JSON.stringify({ version: 2, panel: { taskFilter } }),
+			);
+			expect(bridgeConfig.loadPanelSettings(path).taskFilter).toBe("all");
+		},
+	);
+
+	it.each(["all", "open", "in_progress", "ready", "blocked", "done"] as const)(
+		"persists the %s task filter",
+		(taskFilter) => {
+			bridgeConfig.savePanelSettings(
+				{ ...bridgeConfig.DEFAULT_PANEL_SETTINGS, taskFilter },
+				path,
+			);
+			expect(bridgeConfig.loadPanelSettings(path).taskFilter).toBe(taskFilter);
+		},
+	);
 
 	it("stores repository mappings only in the non-secret file", () => {
 		saveConfig(CREDS, path);

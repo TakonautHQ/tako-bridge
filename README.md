@@ -1,5 +1,7 @@
 # Tako Bridge
 
+**Current release: [v0.4.19](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.4.19).**
+
 Tako Bridge is Takonaut's open-source developer workflow extension for the [Pi agent harness](https://github.com/earendil-works/pi). It brings assigned Takonaut work, governed Project Context, repository verification, durable recovery, tests, human-reviewed completion evidence, and Tako Grill Work hierarchy planning into a local Pi session.
 
 Tako Bridge is interactive and bound to one signed-in Takonaut user. The unattended, organization-owned execution service is the separate [Tako Runner](https://github.com/TakonautHQ/tako-runner) project.
@@ -22,8 +24,10 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.4.18 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.4.19 -l
 ```
+
+To upgrade an existing project-local installation, run the same pinned install command above and reload Pi. Version-pinned Git installs do not automatically advance to newer release tags.
 
 Pi records the package in `.pi/settings.json` and installs it after the project is trusted. To intentionally load Tako Bridge in every Pi project, omit `-l`. If an older release is already installed globally, use `pi list`, remove the exact global source shown there with `pi remove SOURCE`, and then install it locally.
 
@@ -34,6 +38,8 @@ Start Pi in that project, then run:
 /tako-login https://takonaut.app
 /tako-status
 ```
+
+During `/tako-login`, the browser requires an active organization before reviewing or approving consent. If none is selected, choose one of your memberships; the connection code is preserved when returning to the consent page. Changing organizations invalidates the previous review, so you must review again before approving. Saved Bridge credentials with a missing or blank organization ID are rejected locally with a `/tako-login` recovery instruction rather than sending an invalid organization header.
 
 `/tako-setup` reviews the installed Pi packages, asks before changing user-level Pi settings, and installs missing pinned companion packages:
 
@@ -113,17 +119,21 @@ When **Developer Agents** and **Tako Grill** are enabled for the active organiza
 
 Before the interview, Bridge enumerates every active repository linked to the Project and requires each one to be available through a verified local Git root or the caller's authenticated GitHub CLI. It resolves safe refs to exact lowercase commit SHAs, collects bounded evidence at those revisions, and shows a context-consent review. Tracked local diffs require a separate opt-in and are re-collected before consent is reused. Repository content is untrusted evidence and cannot authorize tools, change routing, or issue commands.
 
-The selected Pi model conducts the structured interview; this uses no Takonaut AI credits. The private resumable session covers goal, scope, dependencies, security and privacy, compatibility, repository impact, and success evidence. It stores structured questions, answers, accepted noncritical unknowns, and design decisions—not model reasoning. Repository bodies, local paths, clone URLs, credentials, tokens, prompts, and raw errors are excluded from lifecycle events and diagnostics.
+When **Grill guidance** is also enabled, Bridge loads the Project's latest valid immutable guidance publication at context review. It automatically includes every matching Planning rule and lets the caller add eligible same-transition rules manually; automatic matches cannot be removed. A session pins the exact reviewed revision, so later publication does not alter that interview. Project-wide instructions and Planning rules may guide the interview and require child templates with sibling blocked-by relationships, but remain untrusted planning input and cannot change permissions, consent, feature gates, routing, or commands.
+
+The selected Pi model conducts the structured interview; this uses no Takonaut AI credits. The private resumable session covers goal, scope, dependencies, security and privacy, compatibility, repository impact, and success evidence. It stores structured questions, answers, accepted noncritical unknowns, selected guidance identifiers, and design decisions—not model reasoning. Repository and guidance bodies, local paths, clone URLs, credentials, tokens, prompts, and raw errors are excluded from lifecycle events and diagnostics.
 
 The proposal reviewer is interactive and server-paginated. You can edit supported fields and include or exclude actions before preparation. Bridge then prepares the exact current revision, displays the server-prepared preview and Decision Brief, and asks once for confirmation. The action expires after five minutes, is bound to the current user, organization, API key, session, proposal, and evidence manifest, and cannot be replayed. Login/profile changes, logout, reconnect, feature disable, and extension shutdown invalidate in-flight Grill work.
 
-Confirmed execution applies the complete reviewed batch atomically with an immutable Decision Brief version. New hierarchy items use the selected parent and configured next level. At the Task level, omitted placement defaults to Backlog and omitted assignment remains unassigned; reviewed Sprint, Track, Stage, team, and assignee fields require current permissions and valid Project scope. Grill updates or archives only unchanged Grill-managed children unless you explicitly re-adopt a changed item. Success returns direct links to the resulting children and may offer one child for another Grill, but never starts it automatically.
+Confirmed execution applies the complete reviewed batch, first-class dependency graph, and immutable Decision Brief version atomically. New hierarchy items use the selected parent and configured next level. At the Task level, omitted placement defaults to Backlog and omitted assignment remains unassigned; reviewed Sprint, Track, Stage, team, and assignee fields require current permissions and valid Project scope. Approved required children are created upfront, and downstream work receives real Work item or Task dependencies. Grill updates or archives only unchanged Grill-managed children unless you explicitly re-adopt a changed item. Success returns direct links to the resulting children and may offer one child for another Grill, but never starts it automatically.
 
-Completed Decision Briefs are available as read-only version history on the parent item's Takonaut detail page. Cancelling with `/tako-grill cancel SESSION_ID` erases private questions, answers, and proposal content while retaining only bounded lifecycle metadata. If a prepared action is lost or expires, Bridge invalidates it server-side and returns the session to proposal review before anything can be applied.
+Completed Decision Briefs are available as read-only version history on the parent item's Takonaut detail page, including pinned guidance and dependency provenance. Cancelling with `/tako-grill cancel SESSION_ID` erases private questions, answers, selected guidance, and proposal content while retaining only bounded lifecycle metadata. If a prepared action is lost or expires, Bridge invalidates it server-side and returns the session to proposal review before anything can be applied.
 
 ### Pi status panel and Standup draft
 
-In interactive Pi sessions, Tako Bridge shows a compact panel above the prompt editor with connection state, the active run, ready/blocked totals, configured Stage-name counts, current task rows, and the selected Project's Standup status. Use `/tako-panel` to show or hide sections, set the task-row limit to 1, 3, 5, or 10, change the refresh interval, select the Standup Project, or enable the optional Debug block. Debug shows safe panel-refresh, telemetry, and reconciliation timing/status details without credentials or payload contents. Preferences are stored in the non-secret `~/.takonaut/bridge.json` file.
+In interactive Pi sessions, Tako Bridge shows a compact panel above the prompt editor with connection state, the active run, ready/blocked/done totals, configured Stage-name counts, current task rows, and the selected Project's Standup status. Use `/tako-panel` to show or hide sections, set the task-row limit to 1, 3, 5, or 10, choose which tasks to show, change the refresh interval, select the Standup Project, or enable the optional Debug block. Debug shows safe panel-refresh, telemetry, and reconciliation timing/status details without credentials or payload contents. Preferences are stored in the non-secret `~/.takonaut/bridge.json` file.
+
+**Show tasks** cycles through **All** (default), **Open** (not done), **In progress**, **Ready** (can start via Bridge), **Blocked** (cannot start via Bridge, excluding done), and **Done**. In-progress tasks may also be ready or blocked. These filters apply only to the panel's existing assigned current work—not historical Sprints or unpulled Kanban backlog—and do not filter `/tako-tasks`. Panel rows put in-progress work first, then ready, blocked, and done, preserving server order within each group. Completed tasks use `✓` instead of the blocked marker `◇`; ready tasks use `◆`. Counts and task recommendations follow the selected filter; an active run's status remains visible independently. The footer distinguishes matching tasks beyond the row limit from tasks excluded by the filter.
 
 `/tako-standup` asks before sending the current Pi conversation and bounded Git log/status summaries to the developer's configured Pi model. The generated sections open in an editor for review. Only after a second confirmation does Bridge upload the reviewed draft to Takonaut for 15 minutes and open the authenticated Standup form in the system browser. It never submits the Standup automatically.
 

@@ -1979,6 +1979,126 @@ describe("Tako Grill repository evidence", () => {
 			);
 		});
 
+		it("shows guidance and dependency provenance and edits reviewed dependencies", async () => {
+			const grill = await loadGrillModule();
+			const Reviewer = grill.TakoGrillProposalReviewer as unknown as new (
+				dependencies: Record<string, unknown>,
+			) => Record<string, unknown>;
+			const review = grill.reviewTakoGrillProposal as (
+				input: Record<string, unknown>,
+			) => Promise<Record<string, unknown>>;
+			const ruleId = "11111111-1111-4111-8111-111111111111";
+			const revisionId = "22222222-2222-4222-8222-222222222222";
+			let proposalRevision = 1;
+			let proposalDigest = "c".repeat(64);
+			const actions = [
+				{
+					...action("contract", "add"),
+					title: "Approve contract",
+					guidance_binding: {
+						revision_id: revisionId,
+						rule_id: ruleId,
+						child_key: "contract",
+					},
+					depends_on_action_ids: [],
+				},
+				{
+					...action("implementation", "add"),
+					title: "Implement API",
+					guidance_binding: {
+						revision_id: revisionId,
+						rule_id: ruleId,
+						child_key: "implementation",
+					},
+					depends_on_action_ids: ["contract"],
+				},
+			];
+			const guidance = {
+				revision_id: revisionId,
+				version_number: 3,
+				content_digest: "d".repeat(64),
+				selected_rules: [{ id: ruleId, name: "Contract first" }],
+			};
+			const callTool = vi.fn(
+				async (name: string, args: Record<string, unknown>) => {
+					if (name === "get_tako_grill_proposal") {
+						return {
+							session_id: sessionId,
+							status: "proposal_review",
+							proposal_revision: proposalRevision,
+							proposal_digest: proposalDigest,
+							summary: { intent: "Ship", desired_outcome: "Ready" },
+							accepted_unknowns: [],
+							actions,
+							total_count: 2,
+							included_mutation_count: 2,
+							action_counts: {
+								add: 2,
+								update: 0,
+								keep: 0,
+								archive: 0,
+								conflict: 0,
+							},
+							guidance,
+							truncated: false,
+						};
+					}
+					if (name === "edit_tako_grill_proposal_action") {
+						proposalRevision += 1;
+						proposalDigest = "e".repeat(64);
+						const target = actions.find((item) => item.id === args.action_id);
+						Object.assign(target ?? {}, args.changes);
+						return {
+							session_id: sessionId,
+							status: "proposal_review",
+							proposal_revision: proposalRevision,
+							proposal_digest: proposalDigest,
+							action: target,
+						};
+					}
+					return { preparation_allowed: true };
+				},
+			);
+			const reviewer = new Reviewer({ callTool });
+			let proposalSelections = 0;
+			const select = vi.fn(async (title: string, choices: string[]) => {
+				if (title === "Tako Grill proposal") {
+					proposalSelections += 1;
+					if (proposalSelections === 1) {
+						const display = choices.join("\n");
+						expect(display).toContain("Required by: Contract first");
+						expect(display).toContain("Blocked by: Approve contract");
+						return choices.find((choice) => choice.includes("Implement API"));
+					}
+					return "Finish review without applying";
+				}
+				if (title === "Tako Grill action") return "Edit dependencies";
+				return undefined;
+			});
+
+			await expect(
+				review({
+					reviewer,
+					sessionId,
+					projectKey: "ATL",
+					serverUrl: "https://takonaut.app/mcp/",
+					ui: {
+						select,
+						input: vi.fn(async () => JSON.stringify([])),
+						confirm: vi.fn(async () => true),
+					},
+				}),
+			).resolves.toEqual({ status: "review_paused" });
+			expect(callTool).toHaveBeenCalledWith(
+				"edit_tako_grill_proposal_action",
+				expect.objectContaining({
+					action_id: "implementation",
+					changes: { depends_on_action_ids: [] },
+				}),
+				expect.any(AbortSignal),
+			);
+		});
+
 		it("invalidates in-flight reviewer operations on lifecycle teardown", async () => {
 			const grill = await loadGrillModule();
 			const Reviewer = grill.TakoGrillProposalReviewer as unknown as new (
@@ -2047,6 +2167,127 @@ describe("Tako Grill repository evidence", () => {
 				code: "reviewer_invalidated",
 			});
 			expect(executeAction).not.toHaveBeenCalled();
+		});
+	});
+
+	describe("guidance review", () => {
+		const revisionId = "5228dbb1-60a7-4ea8-aa12-4b6876df7894";
+		const automaticId = "3a3dc1bb-e204-4eaa-a5bc-65a5cfd6c0ee";
+		const manualId = "4cb8d9d0-02f2-4198-b452-67a5cfd6c0ef";
+		const payload = () => ({
+			session_id: revisionId,
+			untrusted_planning_guidance: true,
+			guidance: {
+				revision_id: revisionId,
+				version_number: 2,
+				content_digest: "a".repeat(64),
+				project_guidance: "Plan contracts before implementation.",
+				automatic_rules: [
+					{
+						id: automaticId,
+						name: "Contract first",
+						instructions: "Create the contract.",
+						automatic: true,
+						match_reason_code: "transition_conditions_matched",
+						children: [
+							{
+								key: "contract",
+								title: "Approve contract",
+								instructions: "Publish the reviewed schema.",
+								fields: { scope: "Public API" },
+								depends_on: [],
+							},
+						],
+					},
+				],
+				selectable_rules: [
+					{
+						id: manualId,
+						name: "Optional review",
+						instructions: "Review the release.",
+						automatic: false,
+						match_reason_code: "transition_available",
+						children: [],
+					},
+				],
+			},
+		});
+
+		it("strictly parses guidance, retains automatic rules, and rejects a cross-list duplicate", async () => {
+			const grill = await loadGrillModule();
+			const parse = grill.parseTakoGrillGuidanceContext as (value: unknown) => {
+				revisionId: string;
+				selectedRuleIds: string[];
+			};
+			expect(parse(payload())).toMatchObject({
+				revisionId,
+				selectedRuleIds: [automaticId],
+			});
+			const malicious = payload();
+			malicious.guidance.selectable_rules[0].id = automaticId;
+			expect(() => parse(malicious)).toThrow(/malformed_guidance/);
+		});
+
+		it("passes only selected rules into the model-facing guidance payload", async () => {
+			const grill = await loadGrillModule();
+			const parse = grill.parseTakoGrillGuidanceContext as (
+				value: unknown,
+			) => Record<string, unknown>;
+			const applied = grill.buildTakoGrillAppliedGuidance as (
+				value: Record<string, unknown>,
+			) => Record<string, unknown>;
+			const modelPayload = applied(parse(payload()));
+
+			expect(JSON.stringify(modelPayload)).toContain("Create the contract.");
+			expect(JSON.stringify(modelPayload)).not.toContain("Review the release.");
+			expect(modelPayload).toMatchObject({
+				untrusted: true,
+				revision_id: revisionId,
+				selected_rule_ids: [automaticId],
+			});
+		});
+
+		it("formats every selected instruction and required child for context consent", async () => {
+			const grill = await loadGrillModule();
+			const parse = grill.parseTakoGrillGuidanceContext as (
+				value: unknown,
+			) => Record<string, unknown>;
+			const parsed = parse(payload());
+			const format = grill.formatTakoGrillGuidanceReview as (
+				value: Record<string, unknown>,
+			) => string[];
+
+			expect(format(parsed)).toEqual(
+				expect.arrayContaining([
+					"Planning guidance: publication v2",
+					"Project guidance: Plan contracts before implementation.",
+					"Automatic rule: Contract first (transition conditions matched)",
+					"Rule instructions: Create the contract.",
+					"Required child: Approve contract [contract]",
+					"Child instructions: Publish the reviewed schema.",
+					'Child defaults: {"scope":"Public API"}',
+					"Blocked by: None",
+				]),
+			);
+		});
+
+		it("toggles only selectable rules and never permits suppressing automatic rules", async () => {
+			const grill = await loadGrillModule();
+			const review = grill.reviewTakoGrillGuidance as (
+				value: unknown,
+				select: (
+					title: string,
+					choices: string[],
+				) => Promise<string | undefined>,
+			) => Promise<{ selectedRuleIds: string[] }>;
+			let calls = 0;
+			const reviewed = await review(payload(), async (_title, choices) => {
+				calls += 1;
+				return calls === 1
+					? choices.find((choice) => choice.includes(manualId))
+					: "Continue with selected rules";
+			});
+			expect(reviewed.selectedRuleIds).toEqual([automaticId, manualId]);
 		});
 	});
 });

@@ -9,6 +9,7 @@ import {
 } from "@earendil-works/pi-tui";
 
 import type { PanelSettings } from "./config.js";
+import { PANEL_TASK_FILTERS, PANEL_TASK_FILTER_LABELS } from "./panel-tasks.js";
 
 interface PanelSettingsCallbacks {
 	onSettingsChange: (settings: PanelSettings) => void;
@@ -19,9 +20,9 @@ interface PanelSettingsCallbacks {
 
 const TASK_LIMITS: PanelSettings["taskLimit"][] = [1, 3, 5, 10];
 const REFRESH_INTERVALS: PanelSettings["refreshSeconds"][] = [0, 15, 30, 60];
-const ROW_COUNT = 10;
+const ROW_COUNT = 11;
 
-function cycleValue<T>(values: T[], current: T, direction: -1 | 1): T {
+function cycleValue<T>(values: readonly T[], current: T, direction: -1 | 1): T {
 	const currentIndex = Math.max(0, values.indexOf(current));
 	return values[(currentIndex + direction + values.length) % values.length];
 }
@@ -106,6 +107,16 @@ export class PanelSettingsView implements Component, Focusable {
 			case 6:
 				this.commit({
 					...this.settings,
+					taskFilter: cycleValue(
+						PANEL_TASK_FILTERS,
+						this.settings.taskFilter,
+						direction,
+					),
+				});
+				break;
+			case 7:
+				this.commit({
+					...this.settings,
 					refreshSeconds: cycleValue(
 						REFRESH_INTERVALS,
 						this.settings.refreshSeconds,
@@ -113,13 +124,13 @@ export class PanelSettingsView implements Component, Focusable {
 					),
 				});
 				break;
-			case 7:
+			case 8:
 				this.commit({ ...this.settings, debug: !this.settings.debug });
 				break;
-			case 8:
+			case 9:
 				this.callbacks.onRefresh();
 				break;
-			case 9:
+			case 10:
 				this.callbacks.onDone();
 				break;
 			default:
@@ -180,6 +191,7 @@ export class PanelSettingsView implements Component, Focusable {
 			this.toggleLabel(this.settings.showStandup, "Standup status"),
 			`      Standup Project  ${this.settings.standupProjectKey ?? "Not selected"}`,
 			`      Task rows        ${this.settings.taskLimit}`,
+			`      Show tasks       ${PANEL_TASK_FILTER_LABELS[this.settings.taskFilter]}`,
 			`      Refresh          ${refresh}`,
 			this.toggleLabel(this.settings.debug, "Debug details"),
 			"      Refresh now",

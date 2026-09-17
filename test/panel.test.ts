@@ -227,6 +227,95 @@ describe("Tako Bridge responsive panel", () => {
 		).toBe(true);
 	});
 
+	it("puts completed tasks last and does not count them as blocked", () => {
+		const done = {
+			...panelData.tasks[0],
+			task_key: "PAY-999",
+			stage_name: "Shipped",
+			stage_group: "done",
+			startability: { startable: false, reasons: ["terminal_stage"] },
+		};
+		const data = {
+			...panelData,
+			showRun: false,
+			showStandup: false,
+			tasks: [done, ...panelData.tasks],
+			taskLimit: 10,
+		};
+		const lines = render(120, data);
+		const rows = plain(lines).filter((line) => /[◆◇✓] PAY-/.test(line));
+		expect(rows.at(-1)).toContain("✓ PAY-999");
+		expect(plain(lines).join("\n")).toContain("2 ready · 1 blocked · 1 done");
+		expectFullWidth(lines, 120);
+	});
+
+	it("applies the filter and ordering before the row limit and NEXT recommendation", () => {
+		const active = { ...panelData.tasks[1], stage_group: "in_progress" };
+		const data: BridgePanelData = {
+			...panelData,
+			run: null,
+			showRun: false,
+			showStandup: false,
+			taskFilter: "ready",
+			taskLimit: 1,
+			tasks: [panelData.tasks[2], panelData.tasks[0], active],
+		};
+		const text = plain(render(120, data)).join("\n");
+		expect(text).toContain("WORK · Ready");
+		expect(text).toContain("2 ready · 0 blocked");
+		expect(text).toContain("◆ PAY-162");
+		expect(text).toContain("/tako-start PAY-162");
+		expect(text).not.toContain("PAY-155");
+		expect(text).not.toContain("PAY-143");
+		expect(text).toContain("+1 more · 1 filtered");
+	});
+
+	it("does not recommend a filtered-out ready task", () => {
+		const text = plain(
+			render(120, {
+				...panelData,
+				run: null,
+				showStandup: false,
+				taskFilter: "blocked",
+			}),
+		).join("\n");
+		expect(text).toContain("◇ PAY-143");
+		expect(text).not.toContain("/tako-start");
+		expect(text).not.toContain("PAY-155");
+	});
+
+	it.each([24, 52, 84, 120])(
+		"shows an empty filtered state at width %s",
+		(width) => {
+			const lines = render(width, {
+				...panelData,
+				run: null,
+				showRun: false,
+				showStandup: false,
+				taskFilter: "done",
+			});
+			expectFullWidth(lines, width);
+			const text = plain(lines).join("\n");
+			expect(text).toContain("WORK · Done");
+			expect(text).not.toContain("PAY-");
+			if (width >= 84) expect(text).toContain("No matching tasks");
+		},
+	);
+
+	it("does not advertise hidden task rows when tasks are switched off", () => {
+		const text = plain(
+			render(120, {
+				...panelData,
+				showTasks: false,
+				taskLimit: 1,
+				taskFilter: "ready",
+			}),
+		).join("\n");
+		expect(text).not.toContain("more");
+		expect(text).not.toContain("filtered");
+		expect(text).not.toContain("WORK");
+	});
+
 	it("renders delayed state as a complete full-width frame", () => {
 		const width = 72;
 		const lines = createBridgePanelErrorWidget(

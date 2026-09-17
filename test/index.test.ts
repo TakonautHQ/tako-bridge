@@ -62,6 +62,7 @@ const mocks = vi.hoisted(() => ({
 		showStandup: true,
 		debug: false,
 		taskLimit: 3 as 1 | 3 | 5 | 10,
+		taskFilter: "all" as import("../src/panel-tasks.js").PanelTaskFilter,
 		refreshSeconds: 30 as 0 | 15 | 30 | 60,
 		standupProjectKey: undefined as string | undefined,
 	},
@@ -291,6 +292,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			showStandup: true,
 			debug: false,
 			taskLimit: 3,
+			taskFilter: "all",
 			refreshSeconds: 30,
 			standupProjectKey: undefined,
 		};
@@ -656,6 +658,59 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			{ session_id: sessionId },
 			expect.any(AbortSignal),
 		);
+	});
+
+	it("resolves a supplied parent ID without requiring interactive Project input", async () => {
+		const { commands } = setup();
+		const sessionId = "5228dbb1-60a7-4ea8-aa12-4b6876df7894";
+		const parentId = "876540a9-670a-47df-bc7b-c8a9253e6b24";
+		mocks.callTool.mockImplementation(
+			async (name: string, args: Record<string, unknown>) => {
+				if (name === "resolve_tako_grill_parent") {
+					expect(args).toEqual({ parent_work_item_id: parentId });
+					return { project_key: "ATL", parent_work_item_id: parentId };
+				}
+				if (name === "start_tako_grill_session") {
+					expect(args).toEqual({
+						project_key: "ATL",
+						parent_work_item_id: parentId,
+					});
+					return { session_id: sessionId, status: "proposal_review" };
+				}
+				if (name === "get_tako_grill_proposal") {
+					return {
+						session_id: sessionId,
+						status: "proposal_review",
+						proposal_revision: 1,
+						proposal_digest: "a".repeat(64),
+						summary: {},
+						accepted_unknowns: [],
+						actions: [],
+						total_count: 0,
+						included_mutation_count: 0,
+						action_counts: {
+							add: 0,
+							update: 0,
+							keep: 0,
+							archive: 0,
+							conflict: 0,
+						},
+						truncated: false,
+					};
+				}
+				throw new Error(`unexpected tool: ${name}`);
+			},
+		);
+		const ctx = { ...commandContext(), hasUI: false };
+
+		await commands.get("tako-grill")?.(parentId, ctx);
+
+		expect(mocks.callTool.mock.calls.map(([name]) => name)).toEqual([
+			"resolve_tako_grill_parent",
+			"start_tako_grill_session",
+			"get_tako_grill_proposal",
+		]);
+		expect(ctx.ui.input).not.toHaveBeenCalled();
 	});
 
 	it("uses focused Work hierarchy discovery for the no-argument Grill picker", async () => {
@@ -1531,7 +1586,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 				{},
 				vi.fn(),
 			);
-			for (let index = 0; index < 7; index += 1) view.handleInput("\u001b[B");
+			for (let index = 0; index < 8; index += 1) view.handleInput("\u001b[B");
 			view.handleInput("\r");
 		});
 
@@ -1541,6 +1596,50 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			expect.objectContaining({ debug: true }),
 			"/home/dev/.takonaut/bridge.json",
 		);
+	});
+
+	it("persists and immediately applies the selected panel task filter", async () => {
+		mocks.listStartableTasks.mockResolvedValue({
+			tasks: [
+				{
+					task_key: "PAY-1",
+					task_title: "Shipped",
+					project_key: "PAY",
+					stage_group: "done",
+					startability: { startable: false, reasons: ["terminal_stage"] },
+				},
+				{
+					task_key: "PAY-2",
+					task_title: "Next task",
+					project_key: "PAY",
+					stage_group: "todo",
+					startability: { startable: true, reasons: [] },
+				},
+			],
+		});
+		const { commands, events } = setup();
+		const ctx = { ...commandContext(), mode: "tui" };
+		const theme = {
+			fg: (_color: string, text: string) => text,
+			bg: (_color: string, text: string) => text,
+			bold: (text: string) => text,
+		};
+		await events.get("session_start")?.({}, ctx);
+		ctx.ui.custom.mockImplementationOnce(async (factory: any) => {
+			const view = factory({ requestRender: vi.fn() }, theme, {}, vi.fn());
+			for (let index = 0; index < 6; index += 1) view.handleInput("\u001b[B");
+			view.handleInput("\r"); // All -> Open
+		});
+		await commands.get("tako-panel")?.("", ctx);
+		expect(mocks.savePanelSettings).toHaveBeenCalledWith(
+			expect.objectContaining({ taskFilter: "open" }),
+			"/home/dev/.takonaut/bridge.json",
+		);
+		const widgetFactory = ctx.ui.setWidget.mock.calls.at(-1)?.[1];
+		const text = widgetFactory({}, theme).render(120).join("\n");
+		expect(text).toContain("WORK · Open");
+		expect(text).toContain("PAY-2");
+		expect(text).not.toContain("PAY-1");
 	});
 
 	it("lets the developer choose the maximum panel task rows", async () => {
@@ -1768,7 +1867,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			clientId: "client-1",
 			sessionId: "pi-session-1",
 			sessionLabel: expect.stringContaining("PAY-142"),
-			extensionVersion: "0.4.18",
+			extensionVersion: "0.4.19",
 			manifestSchemaVersion: 2,
 			baseRefOverrides: [],
 			idempotencyKey: expect.stringMatching(
