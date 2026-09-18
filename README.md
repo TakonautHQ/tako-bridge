@@ -1,17 +1,17 @@
 # Tako Bridge
 
-**Current release: [v0.4.19](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.4.19).**
+**Current release: [v0.4.20](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.4.20).**
 
 Tako Bridge is Takonaut's open-source developer workflow extension for the [Pi agent harness](https://github.com/earendil-works/pi). It brings assigned Takonaut work, governed Project Context, repository verification, durable recovery, tests, human-reviewed completion evidence, and Tako Grill Work hierarchy planning into a local Pi session.
 
 Tako Bridge is interactive and bound to one signed-in Takonaut user. The unattended, organization-owned execution service is the separate [Tako Runner](https://github.com/TakonautHQ/tako-runner) project.
 
-## Requirements
+## Requirements for governed delivery
 
 - macOS or Linux
 - [Pi 0.84](https://github.com/earendil-works/pi) or a compatible newer release
 - Git
-- [GitHub CLI](https://cli.github.com/) authenticated with access to the connected repository
+- [GitHub CLI](https://cli.github.com/) authenticated with access to the connected repository (optional for issue reporting)
 - Repository-local or effective `git config user.name` and `git config user.email`
 - A Takonaut organization with **Developer Agents** enabled
 - An assigned work item whose Project Agent Setup contains authorized GitHub Code Workspaces
@@ -24,10 +24,19 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.4.19 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.4.20 -l
 ```
 
-To upgrade an existing project-local installation, run the same pinned install command above and reload Pi. Version-pinned Git installs do not automatically advance to newer release tags.
+To upgrade an existing project-local installation, run the pinned install command above, then restart Pi or run `/reload` in the existing Pi session. Version-pinned Git installs do not automatically advance to newer release tags.
+
+To try the reporting flow after installing or upgrading, run in Pi:
+
+```text
+/reload
+/tako-report
+```
+
+Reporting can prepare a draft without Takonaut login or GitHub CLI. Publishing requires your GitHub account, either through authenticated `gh` or the browser form; **Save locally** works without a GitHub account.
 
 Pi records the package in `.pi/settings.json` and installs it after the project is trusted. To intentionally load Tako Bridge in every Pi project, omit `-l`. If an older release is already installed globally, use `pi list`, remove the exact global source shown there with `pi remove SOURCE`, and then install it locally.
 
@@ -94,8 +103,27 @@ Human decisions remain in Takonaut's Review queue. Approval completes the govern
 | `/tako-reconnect` | Explicitly authorize a replacement personal Pi key for retained state. |
 | `/tako-tasks` | Search current assigned work by key, title, Project, Sprint, or Stage, then open the selected item in Takonaut. Sprint Projects show the active Sprint; Kanban Projects show pulled, unarchived board work. |
 | `/tako-panel` | Configure the persistent Tako Bridge panel above Pi's prompt editor. |
+| `/tako-report [title]` | Review a sanitised public Bridge issue; submit with `gh`, open GitHub's issue form, or save a local draft. |
 | `/tako-standup` | Draft a Standup from the current Pi session and bounded Git activity, then open the reviewed draft in Takonaut. |
 | `/tako-grill [ITEM_ID\|ITEM_URL\|cancel SESSION_ID]` | Start, resume, or cancel a private governed interview that proposes the selected Work hierarchy item's immediate children. |
+
+### Issue reporting
+
+`/tako-report [title]` is included starting in **v0.4.20**. It works without a Takonaut connection, repository setup, or GitHub CLI, including when login fails.
+
+1. Choose **Bug report** or **Feature request**, enter a title, and describe what happened, what you expected, and reproduction steps (or the requested improvement).
+2. Optionally include minimal diagnostics: Bridge/Pi/Node versions, platform/architecture, and recent Bridge failure categories with timestamps and occurrence counts. The history is memory-only, retains at most 10 individual failures from the last hour (grouped only for display), and clears on session start/shutdown, successful login, or logout. It cannot recover failures that were never captured. Categories are observations, **not root-cause diagnoses**.
+3. Review and edit the **exact title and body** intended for the public `TakonautHQ/tako-bridge` repository. Recognisable credentials, auth/cookie headers, URLs, emails, and common local paths are redacted; private keys/certificates are refused. If editing triggers more redaction, the changed report must be reviewed again. Redaction is best-effort: remove all private/customer data yourself before proceeding.
+4. Choose delivery, then explicitly confirm:
+   - **Submit with GitHub CLI** appears when `gh` is installed and authenticated on `github.com`. Bridge makes one `gh issue create` attempt using a private temporary body file, cleans it up, and returns the validated issue URL. This uses your GitHub CLI account, not your Takonaut credential. No shared token is needed.
+   - **Open GitHub form** opens an encoded, prefilled form. Its reviewed contents may remain in browser history. Long reports are saved in full to an owner-only temporary Markdown file; copy the description into the form rather than truncating it. On remote/headless machines or browser-launch failures, Bridge provides a manual link and a local copy. **You must sign into GitHub and click Submit new issue yourself.** Opening the form is not proof that an issue was created.
+   - **Save locally** keeps an owner-only temporary Markdown draft outside the repository. This requires no GitHub account and publishes nothing. Retain the file if needed; the operating system may remove temporary files.
+
+Reporting uses local questions/templates, not an LLM. It never reads conversation history, source files, raw logs, tool arguments/results, credentials, or customer records to populate a report. Automatically captured diagnostics contain only allowlisted metadata, not raw error messages. The command is interactive-only, supports cancellation, and refuses overlapping report flows. Nothing is sent to a model or Takonaut backend. Checking GitHub CLI readiness does not transmit report text.
+
+An uncertain CLI submission is **never automatically retried or replaced with a new-issue form**: GitHub may have accepted it before the response was lost. Bridge offers to save the draft or open the existing issue list so you can check before resubmitting. Check existing reports before filing duplicates.
+
+Choose **Security vulnerability (private)** for security issues. Bridge directs you to **<security@takonaut.com>** and does not open or submit a public report; see [SECURITY.md](SECURITY.md).
 
 ### Authorized Takonaut MCP tools
 

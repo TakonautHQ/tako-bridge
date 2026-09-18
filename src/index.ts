@@ -8,6 +8,7 @@
 //   /tako-cancel-ack            acknowledge an observed cancellation request
 //   /tako-cleanup               clean retained terminal managed worktrees
 //   /tako-diagnostics W PATH    explicitly upload one redacted Diagnostic bundle
+//   /tako-report                review a sanitised GitHub issue or local draft
 //   /tako-tasks                 list current assigned work with Stage status
 //   /tako-start TASK-KEY        context → repository preflight → reserve/claim
 //   /tako-agentic-test W CMD    execute head-bound Workspace test evidence
@@ -33,6 +34,7 @@ import {
 import { TakonautToolCatalog } from "./catalog";
 import { collectLocalContext, formatLocalContextForInjection } from "./context";
 import { readAndPrepareDiagnostic } from "./diagnostics";
+import { BridgeReporter } from "./report.js";
 import {
 	clearActiveCredential,
 	loadConfig,
@@ -210,6 +212,34 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 
 	const runner: CommandRunner = async (command, args, options) =>
 		execute(pi, command, args, options);
+	const reporter = new BridgeReporter({ run: runner });
+
+	function note(
+		ctx: ExtensionContext,
+		message: string,
+		kind: "info" | "warning" | "error" = "info",
+	): void {
+		if (kind === "error") reporter.diagnostics.record("command", message);
+		displayNote(ctx, message, kind);
+	}
+
+	// Reporting must remain available before login and when saved credentials fail.
+	pi.registerCommand("tako-report", {
+		description:
+			"Review a sanitised Bridge issue; submit via gh, open GitHub, or save locally",
+		handler: (args, ctx) => reporter.run(ctx, args),
+	});
+	pi.on("tool_result", (event) => {
+		if (
+			event.isError &&
+			/^(?:tako_mcp_[a-z0-9_]+|tako_search_capabilities|tako_read|tako_action)$/.test(
+				event.toolName,
+			)
+		) {
+			// Do not inspect or retain tool arguments, result content, names, or details.
+			reporter.diagnostics.record("tool");
+		}
+	});
 
 	async function collectGovernedContext(
 		conn: TakonautClient,
@@ -565,6 +595,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				durationMs: Date.now() - startedAt,
 				errorCode: timedOut ? "panel_refresh_timeout" : "panel_refresh_failed",
 			};
+			reporter.diagnostics.record("panel", timedOut ? "timeout" : undefined);
 			const currentSettings = loadPanelSettings(c.configPath);
 			if (currentSettings.visible) {
 				renderPanelRefreshError(ctx, currentSettings);
@@ -777,6 +808,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				if (!current || current.runId !== state.runId) return;
 				const timedOut =
 					error instanceof Error && error.message === "telemetry_timeout";
+				reporter.diagnostics.record("telemetry", error);
 				telemetrySync = {
 					...telemetrySync,
 					state: timedOut ? "timeout" : "error",
@@ -950,6 +982,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				const nextConfig = saveConfig(result);
 				connectionGeneration += 1;
 				const committedGeneration = connectionGeneration;
+				reporter.reset();
 				clearGrillReviewer();
 				stopAgentTelemetry();
 				stopPanel();
@@ -1019,6 +1052,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			try {
 				connectionGeneration += 1;
 				connectionSuppressed = true;
+				reporter.reset();
 				const activeConfig = cfg;
 				const previousClient = client;
 				stopAgentTelemetry();
@@ -3344,7 +3378,14 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	);
 
 	pi.on("session_start", async (_event, ctx) => {
-		const c = cfg ?? (cfg = loadConfig());
+		reporter.reset();
+		let c: TakonautConfig | null;
+		try {
+			c = cfg ?? (cfg = loadConfig());
+		} catch (error) {
+			reporter.diagnostics.record("connection", error);
+			throw error;
+		}
 		if (!c) {
 			if (ctx.mode === "tui" && ctx.ui?.setWidget) {
 				ctx.ui.setWidget("tako-bridge-panel", (_tui, theme) =>
@@ -3409,6 +3450,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		reporter.reset();
 		connectionGeneration += 1;
 		connectionSuppressed = true;
 		clearGrillReviewer();
@@ -3628,7 +3670,7 @@ function boundedSummary(result: CommandResult): string {
 	return redactSensitiveValues(text).slice(-2_000);
 }
 
-function note(
+function displayNote(
 	ctx: ExtensionContext,
 	message: string,
 	kind: "info" | "warning" | "error" = "info",

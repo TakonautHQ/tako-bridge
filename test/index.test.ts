@@ -632,6 +632,91 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		return factory({}, theme).render(width) as string[];
 	}
 
+	it("offers reviewed reporting before Takonaut login without invoking the model or publishing", async () => {
+		mocks.config = null;
+		const { commands, pi } = setup();
+		const ctx = commandContext();
+		expect(commands.has("tako-report")).toBe(true);
+		await commands.get("tako-tasks")?.("", ctx);
+		ctx.ui.input.mockResolvedValueOnce("Cannot connect");
+		ctx.ui.editor.mockResolvedValueOnce(
+			"Login failed; I expected a connection.",
+		);
+		ctx.ui.select
+			.mockResolvedValueOnce("Bug report")
+			.mockResolvedValueOnce("Include minimal diagnostics")
+			.mockResolvedValueOnce("Cancel");
+		await commands.get("tako-report")?.("", ctx);
+		expect(ctx.ui.editor.mock.calls.at(-1)?.[1]).toContain("command: failure");
+		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+		expect(mocks.callTool).not.toHaveBeenCalled();
+		expect(pi.exec.mock.calls.some(([, args]) => args[0] === "issue")).toBe(
+			false,
+		);
+	});
+
+	it("captures only Bridge tool failure metadata and clears it on shutdown", async () => {
+		mocks.config = null;
+		const { commands, events } = setup();
+		const ctx = commandContext();
+		await events.get("tool_result")?.(
+			{ toolName: "bash", isError: true, content: "private unrelated error" },
+			ctx,
+		);
+		await events.get("tool_result")?.(
+			{
+				toolName: "tako_mcp_list_tasks",
+				isError: true,
+				content: "private response",
+				input: { token: "private token" },
+			},
+			ctx,
+		);
+		ctx.ui.editor.mockResolvedValueOnce("An authorised task lookup failed.");
+		ctx.ui.select
+			.mockResolvedValueOnce("Bug report")
+			.mockResolvedValueOnce("Include minimal diagnostics")
+			.mockResolvedValueOnce("Cancel");
+		await commands.get("tako-report")?.("Task lookup failed", ctx);
+		const preview = ctx.ui.editor.mock.calls.at(-1)?.[1] ?? "";
+		expect(preview).toContain("tool: failure (1 occurrence(s))");
+		expect(preview).not.toMatch(
+			/private response|private token|private unrelated error|tako_mcp_list_tasks/,
+		);
+		await events.get("session_shutdown")?.({}, ctx);
+		ctx.ui.editor.mockResolvedValueOnce("No recent captured error.");
+		ctx.ui.select
+			.mockResolvedValueOnce("Bug report")
+			.mockResolvedValueOnce("Include minimal diagnostics")
+			.mockResolvedValueOnce("Cancel");
+		await commands.get("tako-report")?.("Question", ctx);
+		expect(ctx.ui.editor.mock.calls.at(-1)?.[1]).toContain(
+			"No recent Bridge failures",
+		);
+	});
+
+	it("captures panel failures without exposing raw responses, even with debug disabled", async () => {
+		const { commands, events } = setup();
+		const ctx = { ...commandContext(), mode: "tui" };
+		mocks.panelSettings.refreshSeconds = 0;
+		mocks.panelSettings.debug = false;
+		mocks.listStartableTasks.mockRejectedValueOnce(
+			new Error("private customer response"),
+		);
+		await events.get("session_start")?.({}, ctx);
+		ctx.ui.editor.mockResolvedValueOnce("The panel did not load.");
+		ctx.ui.select
+			.mockResolvedValueOnce("Bug report")
+			.mockResolvedValueOnce("Include minimal diagnostics")
+			.mockResolvedValueOnce("Cancel");
+		await commands.get("tako-report")?.("Panel failure", ctx);
+		expect(ctx.ui.editor.mock.calls.at(-1)?.[1]).toContain("panel: failure");
+		expect(ctx.ui.editor.mock.calls.at(-1)?.[1]).not.toContain(
+			"private customer response",
+		);
+		await events.get("session_shutdown")?.({}, ctx);
+	});
+
 	it("registers only the three stable lazy capability tools before authentication", () => {
 		const { tools } = setup();
 
@@ -1867,7 +1952,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			clientId: "client-1",
 			sessionId: "pi-session-1",
 			sessionLabel: expect.stringContaining("PAY-142"),
-			extensionVersion: "0.4.19",
+			extensionVersion: "0.4.20",
 			manifestSchemaVersion: 2,
 			baseRefOverrides: [],
 			idempotencyKey: expect.stringMatching(
