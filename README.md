@@ -1,6 +1,6 @@
 # Tako Bridge
 
-**Current release: [v0.4.20](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.4.20).**
+**Current release: [v0.4.21](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.4.21).**
 
 Tako Bridge is Takonaut's open-source developer workflow extension for the [Pi agent harness](https://github.com/earendil-works/pi). It brings assigned Takonaut work, governed Project Context, repository verification, durable recovery, tests, human-reviewed completion evidence, and Tako Grill Work hierarchy planning into a local Pi session.
 
@@ -24,17 +24,20 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.4.20 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.4.21 -l
 ```
 
 To upgrade an existing project-local installation, run the pinned install command above, then restart Pi or run `/reload` in the existing Pi session. Version-pinned Git installs do not automatically advance to newer release tags.
 
-To try the reporting flow after installing or upgrading, run in Pi:
+To try the update and reporting flows after installing or upgrading, run in Pi:
 
 ```text
 /reload
+/tako-update
 /tako-report
 ```
+
+**New in v0.4.21:** stable-release update indicators, cached background checks, and reviewed scope-specific upgrade instructions. Users on v0.4.20 or earlier must upgrade manually once to gain these controls; Bridge never installs upgrades automatically.
 
 Reporting can prepare a draft without Takonaut login or GitHub CLI. Publishing requires your GitHub account, either through authenticated `gh` or the browser form; **Save locally** works without a GitHub account.
 
@@ -104,8 +107,29 @@ Human decisions remain in Takonaut's Review queue. Approval completes the govern
 | `/tako-tasks` | Search current assigned work by key, title, Project, Sprint, or Stage, then open the selected item in Takonaut. Sprint Projects show the active Sprint; Kanban Projects show pulled, unarchived board work. |
 | `/tako-panel` | Configure the persistent Tako Bridge panel above Pi's prompt editor. |
 | `/tako-report [title]` | Review a sanitised public Bridge issue; submit with `gh`, open GitHub's issue form, or save a local draft. |
+| `/tako-update [check\|on\|off]` | View the latest stable release, release notes, and a reviewed scope-specific upgrade command; control automatic checks. Available starting in v0.4.21. |
 | `/tako-standup` | Draft a Standup from the current Pi session and bounded Git activity, then open the reviewed draft in Takonaut. |
 | `/tako-grill [ITEM_ID\|ITEM_URL\|cancel SESSION_ID]` | Start, resume, or cancel a private governed interview that proposes the selected Work hierarchy item's immediate children. |
+
+### Update indicator
+
+Included starting in **v0.4.21**. In interactive sessions, Bridge checks the public GitHub latest-release endpoint in the background at startup (unless the cache is fresh) and every six hours. A newer stable version adds a small `↑ v… available` / `/tako-update` row to the panel, including its sign-in and delayed states. The normal panel visibility setting is respected. No Takonaut connection, GitHub authentication, or `gh` installation is needed.
+
+- Checks use a fixed, unauthenticated GitHub URL, with no account, workspace, task, or credential data. They do not call Takonaut or an LLM and never block startup or refresh the task list.
+- Only published, stable numeric release tags are accepted. Numeric version comparison prevents lexicographic mistakes and downgrade recommendations; a stable release can supersede an installed prerelease of the same version.
+- Results are cached across sessions. Offline, malformed, timed-out, and rate-limited checks are quiet; background failures back off for six hours, and GitHub retry/reset headers can extend that up to 24 hours. Manual checks respect rate-limit backoff. Last-known releases remain visible for up to seven days and are identified as cached/stale in `/tako-update`.
+- Update settings and public release cache are stored separately in owner-only `~/.takonaut/bridge-update-settings.json` and `~/.takonaut/bridge-update-cache.json`. Background cache writes cannot overwrite your opt-out. Unreadable/unsafe settings disable automatic checks rather than guessing consent. Timers and requests stop on session shutdown/reload; noninteractive sessions do not start automatic checks.
+
+```text
+/tako-update        # show release information and available actions
+/tako-update check  # explicitly check once (even with automatic checks off)
+/tako-update off    # confirm disabling automatic checks, user-wide
+/tako-update on     # confirm enabling automatic checks, user-wide
+```
+
+**Show upgrade command** preserves the active official package's project-local (`-l`) or user-wide scope when Pi's source metadata identifies it. Unknown, local-checkout, temporary, forked, or ambiguous installations require an explicit scope choice. A confirmation shows the exact pinned command and warns that Pi may reset/clean its managed package clone when changing refs. **Bridge does not execute the installer**: run the reviewed command yourself, from the original project directory for a local install, then restart Pi or run `/reload`. There is no automatic update or downgrade. Preserve local changes to managed package clones before upgrading.
+
+Release notes are displayed as bounded, untrusted text outside the model conversation; editing the viewer cannot change the target version or upgrade command. The generated link and command always point to the official `TakonautHQ/tako-bridge` repository.
 
 ### Issue reporting
 

@@ -117,8 +117,33 @@ const mocks = vi.hoisted(() => ({
 		mocks.storedAgenticRun = null;
 	}),
 	getOrCreatePiClientId: vi.fn(() => "client-1"),
+	startUpdates: vi.fn((_changed: () => void) => undefined),
+	stopUpdates: vi.fn(),
+	checkUpdates: vi.fn(async () => undefined),
+	setUpdatesEnabled: vi.fn(),
+	updateSnapshot: {
+		enabled: true,
+		release: null,
+		availableVersion: undefined as string | undefined,
+		checkedAt: null,
+		stale: false,
+		unavailable: false,
+	},
 	stopTelemetry: vi.fn(),
 	startAgentTelemetryReporter: vi.fn((_options: any) => mocks.stopTelemetry),
+}));
+
+vi.mock("../src/updates.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../src/updates.js")>()),
+	BridgeUpdates: class {
+		epoch = 0;
+		installedVersion = "0.4.20";
+		start = mocks.startUpdates;
+		stop = mocks.stopUpdates;
+		check = mocks.checkUpdates;
+		setEnabled = mocks.setUpdatesEnabled;
+		snapshot = () => mocks.updateSnapshot;
+	},
 }));
 
 vi.mock("../src/config", () => ({
@@ -271,6 +296,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		vi.unstubAllEnvs();
+		mocks.updateSnapshot.availableVersion = undefined;
 		mocks.calls.length = 0;
 		mocks.config = {
 			serverUrl: "https://takonaut.test/mcp/",
@@ -715,6 +741,70 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			"private customer response",
 		);
 		await events.get("session_shutdown")?.({}, ctx);
+	});
+
+	it("checks updates without Takonaut login, rerenders locally, and stops on shutdown", async () => {
+		mocks.config = null;
+		const { commands, events } = setup();
+		const ctx = { ...commandContext(), mode: "tui" };
+		await events.get("session_start")?.({}, ctx);
+		expect(commands.has("tako-update")).toBe(true);
+		expect(mocks.startUpdates).toHaveBeenCalledOnce();
+		mocks.updateSnapshot.availableVersion = "0.4.21";
+		mocks.startUpdates.mock.calls[0][0]();
+		expect(renderPanel(ctx).join("\n")).toContain("v0.4.21 available");
+		expect(mocks.listStartableTasks).not.toHaveBeenCalled();
+		ctx.ui.select.mockResolvedValueOnce("Close");
+		await commands.get("tako-update")?.("", ctx);
+		expect(mocks.checkUpdates).toHaveBeenCalled();
+		await events.get("session_shutdown")?.({}, ctx);
+		expect(mocks.stopUpdates).toHaveBeenCalledOnce();
+	});
+
+	it("keeps update rendering local, preserves a panel error, and respects panel visibility", async () => {
+		const { events } = setup();
+		const ctx = { ...commandContext(), mode: "tui" };
+		mocks.panelSettings.refreshSeconds = 0;
+		mocks.listStartableTasks.mockRejectedValueOnce(new Error("offline"));
+		await events.get("session_start")?.({}, ctx);
+		const count = mocks.listStartableTasks.mock.calls.length;
+		mocks.updateSnapshot.availableVersion = "0.4.21";
+		mocks.startUpdates.mock.calls[0][0]();
+		expect(renderPanel(ctx).join("\n")).toContain("DELAYED");
+		expect(renderPanel(ctx).join("\n")).toContain("v0.4.21 available");
+		expect(mocks.listStartableTasks).toHaveBeenCalledTimes(count);
+		mocks.panelSettings.visible = false;
+		ctx.ui.setWidget.mockClear();
+		mocks.startUpdates.mock.calls[0][0]();
+		expect(ctx.ui.setWidget).not.toHaveBeenCalled();
+		await events.get("session_shutdown")?.({}, ctx);
+	});
+
+	it("does not reveal a hidden panel on logged-out startup or update discovery", async () => {
+		mocks.config = null;
+		mocks.panelSettings.visible = false;
+		mocks.updateSnapshot.availableVersion = "0.4.21";
+		const { events } = setup();
+		const ctx = { ...commandContext(), mode: "tui" };
+		await events.get("session_start")?.({}, ctx);
+		expect(ctx.ui.setWidget).toHaveBeenLastCalledWith(
+			"tako-bridge-panel",
+			undefined,
+		);
+		ctx.ui.setWidget.mockClear();
+		mocks.startUpdates.mock.calls[0][0]();
+		expect(ctx.ui.setWidget).not.toHaveBeenCalled();
+		await events.get("session_shutdown")?.({}, ctx);
+	});
+
+	it("does not start automatic update checks in noninteractive sessions", async () => {
+		mocks.config = null;
+		const { events } = setup();
+		await events.get("session_start")?.(
+			{},
+			{ ...commandContext(), hasUI: false },
+		);
+		expect(mocks.startUpdates).not.toHaveBeenCalled();
 	});
 
 	it("registers only the three stable lazy capability tools before authentication", () => {
@@ -1952,7 +2042,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			clientId: "client-1",
 			sessionId: "pi-session-1",
 			sessionLabel: expect.stringContaining("PAY-142"),
-			extensionVersion: "0.4.20",
+			extensionVersion: "0.4.21",
 			manifestSchemaVersion: 2,
 			baseRefOverrides: [],
 			idempotencyKey: expect.stringMatching(

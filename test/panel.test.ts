@@ -316,6 +316,43 @@ describe("Tako Bridge responsive panel", () => {
 		expect(text).not.toContain("WORK");
 	});
 
+	it.each([38, 72, 120])(
+		"renders an update hint in connected, login and error panels at width %s",
+		(width) => {
+			const widgets = [
+				createBridgePanelWidget(
+					{ ...panelData, updateVersion: "0.4.21" },
+					theme,
+				),
+				createBridgePanelLoginWidget(theme, "0.4.21"),
+				createBridgePanelErrorWidget(
+					"Connection delayed",
+					theme,
+					undefined,
+					"0.4.21",
+				),
+			];
+			for (const widget of widgets) {
+				const lines = widget.render(width);
+				expectFullWidth(lines, width);
+				expect(plain(lines).join("\n")).toContain("v0.4.21");
+				if (width >= 72) {
+					expect(plain(lines).join("\n")).toContain("available");
+					expect(plain(lines).join("\n")).toContain("/tako-update");
+				}
+			}
+		},
+	);
+
+	it("hides update hints when no newer release is known or the display version is unsafe", () => {
+		expect(plain(render(120)).join("\n")).not.toContain("/tako-update");
+		expect(
+			plain(
+				createBridgePanelLoginWidget(theme, "bad\x1b[31m").render(120),
+			).join("\n"),
+		).not.toContain("bad");
+	});
+
 	it("renders delayed state as a complete full-width frame", () => {
 		const width = 72;
 		const lines = createBridgePanelErrorWidget(

@@ -65,6 +65,7 @@ export interface BridgePanelData {
 	taskLimit: number;
 	taskFilter?: PanelTaskFilter;
 	debug?: BridgePanelDebugData;
+	updateVersion?: string;
 }
 
 interface PanelSegment {
@@ -457,6 +458,22 @@ function nextAction(data: BridgePanelData): {
 	};
 }
 
+function updateIndicator(
+	theme: PanelTheme,
+	width: number,
+	version?: string,
+): string[] {
+	if (!version || !/^\d+\.\d+\.\d+$/.test(version)) return [];
+	return [
+		framedSplitLine(
+			theme,
+			width,
+			[{ text: ` ↑ v${version} available`, tone: "warning", strong: true }],
+			[{ text: "/tako-update", tone: "accent", strong: true }],
+		),
+	];
+}
+
 export function createBridgePanelWidget(
 	input: BridgePanelData,
 	theme: PanelTheme,
@@ -481,6 +498,8 @@ export function createBridgePanelWidget(
 					{ text: " ─", tone: "borderMuted" },
 				]),
 			];
+
+			lines.push(...updateIndicator(theme, resolvedWidth, data.updateVersion));
 
 			if (resolvedWidth >= WIDE_PANEL_MIN_WIDTH && sections.length >= 2) {
 				const grid = renderColumns(theme, resolvedWidth, sections);
@@ -568,7 +587,10 @@ export function createBridgePanelWidget(
 	};
 }
 
-export function createBridgePanelLoginWidget(theme: PanelTheme) {
+export function createBridgePanelLoginWidget(
+	theme: PanelTheme,
+	updateVersion?: string,
+) {
 	return {
 		render(width: number): string[] {
 			const resolvedWidth = panelWidth(width);
@@ -577,6 +599,7 @@ export function createBridgePanelLoginWidget(theme: PanelTheme) {
 					{ text: "○ SIGN IN", tone: "warning", strong: true },
 					{ text: " ─", tone: "borderMuted" },
 				]),
+				...updateIndicator(theme, resolvedWidth, updateVersion),
 				framedLine(theme, resolvedWidth, [
 					{ text: " Connect Takonaut to see your work here.", tone: "muted" },
 				]),
@@ -607,6 +630,7 @@ export function createBridgePanelErrorWidget(
 	message: string,
 	theme: PanelTheme,
 	debug?: BridgePanelDebugData,
+	updateVersion?: string,
 ) {
 	return {
 		render(width: number): string[] {
@@ -620,6 +644,11 @@ export function createBridgePanelErrorWidget(
 					{ text: ` ${message}`, tone: "muted" },
 				]),
 			];
+			lines.splice(
+				1,
+				0,
+				...updateIndicator(theme, resolvedWidth, updateVersion),
+			);
 			if (debug) lines.push(...renderDebugBlock(theme, resolvedWidth, debug));
 			lines.push(
 				framedRule(

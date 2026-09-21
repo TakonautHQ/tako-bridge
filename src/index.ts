@@ -9,6 +9,7 @@
 //   /tako-cleanup               clean retained terminal managed worktrees
 //   /tako-diagnostics W PATH    explicitly upload one redacted Diagnostic bundle
 //   /tako-report                review a sanitised GitHub issue or local draft
+//   /tako-update                view releases, scoped upgrade instructions, and check preferences
 //   /tako-tasks                 list current assigned work with Stage status
 //   /tako-start TASK-KEY        context → repository preflight → reserve/claim
 //   /tako-agentic-test W CMD    execute head-bound Workspace test evidence
@@ -35,6 +36,8 @@ import { TakonautToolCatalog } from "./catalog";
 import { collectLocalContext, formatLocalContextForInjection } from "./context";
 import { readAndPrepareDiagnostic } from "./diagnostics";
 import { BridgeReporter } from "./report.js";
+import { BridgeUpdates } from "./updates.js";
+import { BridgeUpdateCommand, bridgeInstallScope } from "./update-command.js";
 import {
 	clearActiveCredential,
 	loadConfig,
@@ -213,6 +216,19 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	const runner: CommandRunner = async (command, args, options) =>
 		execute(pi, command, args, options);
 	const reporter = new BridgeReporter({ run: runner });
+	const updates = new BridgeUpdates();
+	const updateCommand = new BridgeUpdateCommand(updates, () => {
+		try {
+			return bridgeInstallScope(pi.getCommands?.(), import.meta.url);
+		} catch {
+			return null;
+		}
+	});
+	pi.registerCommand("tako-update", {
+		description:
+			"Check Bridge releases, review upgrade instructions, or toggle checks: /tako-update [check|on|off]",
+		handler: (args, ctx) => updateCommand.run(ctx, args),
+	});
 
 	function note(
 		ctx: ExtensionContext,
@@ -481,6 +497,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			taskLimit: settings.taskLimit,
 			taskFilter: settings.taskFilter,
 			debug: panelDebugData(settings),
+			updateVersion: updates.snapshot().availableVersion,
 		};
 	}
 
@@ -526,8 +543,31 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				? "Refresh timed out; retrying on the next interval."
 				: "Refresh failed; retrying on the next interval.";
 		ctx.ui.setWidget("tako-bridge-panel", (_tui, theme) =>
-			createBridgePanelErrorWidget(message, theme, panelDebugData(settings)),
+			createBridgePanelErrorWidget(
+				message,
+				theme,
+				panelDebugData(settings),
+				updates.snapshot().availableVersion,
+			),
 		);
+	}
+
+	function renderUpdateIndicator(ctx: ExtensionContext): void {
+		if (ctx.mode !== "tui" || !ctx.ui?.setWidget || connectionSuppressed)
+			return;
+		// Read cached local state only; a version check must never trigger MCP traffic.
+		const settings = loadPanelSettings(cfg?.configPath);
+		if (!settings.visible) return;
+		if (!cfg) {
+			ctx.ui.setWidget("tako-bridge-panel", (_tui, theme) =>
+				createBridgePanelLoginWidget(
+					theme,
+					updates.snapshot().availableVersion,
+				),
+			);
+		} else if (panelSync.state === "error" || panelSync.state === "timeout") {
+			renderPanelRefreshError(ctx, settings);
+		} else renderCurrentPanel(ctx, cfg, settings);
 	}
 
 	async function refreshPanel(
@@ -3379,6 +3419,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		reporter.reset();
+		if (ctx.hasUI) updates.start(() => renderUpdateIndicator(ctx));
 		let c: TakonautConfig | null;
 		try {
 			c = cfg ?? (cfg = loadConfig());
@@ -3388,9 +3429,14 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		}
 		if (!c) {
 			if (ctx.mode === "tui" && ctx.ui?.setWidget) {
-				ctx.ui.setWidget("tako-bridge-panel", (_tui, theme) =>
-					createBridgePanelLoginWidget(theme),
-				);
+				if (loadPanelSettings().visible) {
+					ctx.ui.setWidget("tako-bridge-panel", (_tui, theme) =>
+						createBridgePanelLoginWidget(
+							theme,
+							updates.snapshot().availableVersion,
+						),
+					);
+				} else ctx.ui.setWidget("tako-bridge-panel", undefined);
 			}
 			return;
 		}
@@ -3450,6 +3496,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		updates.stop();
 		reporter.reset();
 		connectionGeneration += 1;
 		connectionSuppressed = true;
