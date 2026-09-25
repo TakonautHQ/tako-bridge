@@ -365,6 +365,7 @@ export type TakoGrillInvocation =
 			target:
 				| { kind: "id"; parentId: string }
 				| { kind: "url"; parentId: string; projectKey: string }
+				| { kind: "search"; query: string }
 				| null;
 	  }
 	| { mode: "cancel"; sessionId: string };
@@ -402,7 +403,19 @@ export function parseTakoGrillInvocation(args: string): TakoGrillInvocation {
 			};
 		}
 	} catch {
-		// Fall through to the stable invocation error below.
+		// A plain phrase may still be a Work hierarchy search.
+	}
+	if (
+		value.length <= 120 &&
+		/^[\p{L}\p{N}][\p{L}\p{N}\s#'&()._-]*$/u.test(value) &&
+		!value.includes("..") &&
+		!/^cancel\b/i.test(value)
+	) {
+		const number = value.match(/^prd\s*#?\s*(\d+)$/i);
+		return {
+			mode: "start",
+			target: { kind: "search", query: number ? `PRD ${number[1]}` : value },
+		};
 	}
 	throw new TakoGrillRepositoryError("invalid_invocation");
 }
@@ -734,6 +747,7 @@ export class TakoGrillController {
 			!UUID_PATTERN.test(parent.parentId) ||
 			!/^[A-Za-z0-9_-]{1,50}$/.test(parent.projectKey) ||
 			(invocation.target !== null &&
+				invocation.target.kind !== "search" &&
 				invocation.target.parentId !== parent.parentId) ||
 			(invocation.target?.kind === "url" &&
 				invocation.target.projectKey !== parent.projectKey)

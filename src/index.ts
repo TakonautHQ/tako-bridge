@@ -74,6 +74,7 @@ import {
 	type GrillRepositoryBinding,
 	type TakoGrillControllerDependencies,
 } from "./tako-grill";
+import { chooseGrillParent } from "./tako-grill-discovery.js";
 import { missingCompanionPackages } from "./setup";
 import { BRIDGE_VERSION } from "./version.js";
 import {
@@ -1145,7 +1146,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 
 	pi.registerCommand("tako-grill", {
 		description:
-			"Start, resume, or cancel a governed Tako Grill: /tako-grill [ITEM_ID|ITEM_URL|cancel SESSION_ID]",
+			"Browse Projects and Work hierarchy, search by title (e.g. /tako-grill prd 39), resume by ID/URL, or cancel SESSION_ID",
 		handler: async (args, ctx) => {
 			const c = currentConfig(ctx);
 			const conn = ensure(ctx);
@@ -1200,52 +1201,19 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 							"Tako Grill parent selection requires an interactive Pi session",
 						);
 					}
-					const projectKey = await ctx.ui.input(
-						"Tako Grill Project",
-						"Enter the Project key",
-					);
-					if (!projectKey)
-						throw new Error("Tako Grill selection was cancelled");
-					grillProjectKey = projectKey.trim();
-					const discovered = await callTool(
-						"list_tako_grill_parents",
-						{
-							project_key: projectKey.trim(),
-							query: "",
-							limit: 50,
+					const selected = await chooseGrillParent({
+						query: target?.kind === "search" ? target.query : null,
+						call: async (name, args, requestSignal) => {
+							requestSignal?.throwIfAborted();
+							const result = await conn.callTool(name, args, requestSignal);
+							requestSignal?.throwIfAborted();
+							return result;
 						},
+						ui: ctx,
 						signal,
-					);
-					if (
-						!Array.isArray(discovered.items) ||
-						discovered.items.length === 0
-					) {
-						throw new Error("No accessible Work hierarchy parents were found");
-					}
-					const choices = new Map<string, string>();
-					for (const item of discovered.items) {
-						if (!item || typeof item !== "object") {
-							throw new Error("Takonaut returned an invalid Grill parent");
-						}
-						const record = item as Record<string, unknown>;
-						if (
-							typeof record.id !== "string" ||
-							typeof record.title !== "string" ||
-							typeof record.level_name !== "string"
-						) {
-							throw new Error("Takonaut returned an invalid Grill parent");
-						}
-						choices.set(
-							`${record.title} · ${record.level_name} · ${record.id}`,
-							record.id,
-						);
-					}
-					const selected = await ctx.ui.select("Tako Grill parent", [
-						...choices.keys(),
-					]);
-					const parentId = selected ? choices.get(selected) : undefined;
-					if (!parentId) throw new Error("Tako Grill selection was cancelled");
-					return { projectKey: grillProjectKey, parentId };
+					});
+					grillProjectKey = selected.projectKey;
+					return selected;
 				},
 				reviewContext: async ({
 					binding,

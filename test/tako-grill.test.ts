@@ -47,6 +47,18 @@ describe("Tako Grill protocol", () => {
 			mode: "start",
 			target: { kind: "id", parentId },
 		});
+		expect(parseInvocation("prd 39")).toEqual({
+			mode: "start",
+			target: { kind: "search", query: "PRD 39" },
+		});
+		expect(parseInvocation("PRD#39")).toEqual({
+			mode: "start",
+			target: { kind: "search", query: "PRD 39" },
+		});
+		expect(parseInvocation("cycle tracking")).toEqual({
+			mode: "start",
+			target: { kind: "search", query: "cycle tracking" },
+		});
 		expect(
 			parseInvocation(
 				`https://takonaut.app/projects/ATL/work-items/${parentId}?sprint=s30`,
@@ -60,6 +72,9 @@ describe("Tako Grill protocol", () => {
 			sessionId: parentId,
 		});
 		expect(() => parseInvocation("../../etc/passwd")).toThrow(
+			expect.objectContaining({ code: "invalid_invocation" }),
+		);
+		expect(() => parseInvocation("cancel nope")).toThrow(
 			expect.objectContaining({ code: "invalid_invocation" }),
 		);
 	});

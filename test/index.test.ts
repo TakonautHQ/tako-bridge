@@ -894,6 +894,10 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		const parentId = "876540a9-670a-47df-bc7b-c8a9253e6b24";
 		mocks.callTool.mockImplementation(
 			async (name: string, args: Record<string, unknown>) => {
+				if (name === "list_projects") {
+					expect(args).toEqual({ query: "", limit: 20 });
+					return [{ key: "ATL", name: "Atlanta" }];
+				}
 				if (name === "list_tako_grill_parents") {
 					expect(args).toEqual({ project_key: "ATL", query: "", limit: 50 });
 					return {
@@ -935,22 +939,99 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			...commandContext(),
 			model: { id: "test-model", provider: "test-provider" },
 		};
-		ctx.ui.input.mockResolvedValueOnce("ATL");
+		ctx.ui.select.mockResolvedValueOnce("Atlanta · ATL");
 		ctx.ui.select.mockResolvedValueOnce(`Checkout · Brief · ${parentId}`);
 		ctx.ui.confirm.mockResolvedValueOnce(false);
 
 		await commands.get("tako-grill")?.("", ctx);
 
-		expect(ctx.ui.select).toHaveBeenCalledWith("Tako Grill parent", [
+		expect(ctx.ui.select).toHaveBeenCalledWith("Tako Grill Project", [
+			"Atlanta · ATL",
+			"Search tako grill project…",
+		]);
+		expect(ctx.ui.select).toHaveBeenCalledWith("Tako Grill Work hierarchy", [
 			`Checkout · Brief · ${parentId}`,
+			"Search tako grill work hierarchy…",
 		]);
 		expect(mocks.callTool.mock.calls.map(([name]) => name)).toEqual([
+			"list_projects",
 			"list_tako_grill_parents",
 			"start_tako_grill_session",
 			"get_tako_grill_context",
 			"list_tako_grill_repositories",
 		]);
 		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+	});
+
+	it("suggests cross-Project PRD matches and starts only the selected parent", async () => {
+		const { commands } = setup();
+		const idA = "876540a9-670a-47df-bc7b-c8a9253e6b24";
+		const idB = "5228dbb1-60a7-4ea8-aa12-4b6876df7894";
+		mocks.callTool.mockImplementation(
+			async (name: string, args: Record<string, unknown>) => {
+				if (name === "list_projects")
+					return [
+						{ key: "ATL", name: "Atlanta" },
+						{ key: "CC", name: "Cureocity" },
+					];
+				if (name === "list_tako_grill_parents") {
+					expect(args.query).toBe("PRD 39");
+					const id = args.project_key === "ATL" ? idA : idB;
+					return {
+						project_key: args.project_key,
+						items: [{ id, title: "PRD 39: Cycle", level_name: "Brief" }],
+						truncated: false,
+					};
+				}
+				if (name === "start_tako_grill_session")
+					return {
+						session_id: idB,
+						status: "context_review",
+						context_revision: 0,
+					};
+				if (name === "get_tako_grill_context")
+					return {
+						parent: { id: idB, title: "PRD 39: Cycle", level_name: "Brief" },
+						target: { kind: "work_item", level_name: "Story" },
+					};
+				if (name === "list_tako_grill_repositories")
+					return { project_key: "CC", repositories: [], truncated: false };
+				throw new Error(`unexpected tool: ${name}`);
+			},
+		);
+		const ctx = {
+			...commandContext(),
+			model: { id: "model", provider: "provider" },
+		};
+		ctx.ui.select.mockResolvedValueOnce(`PRD 39: Cycle · Brief · CC · ${idB}`);
+		ctx.ui.confirm.mockResolvedValueOnce(false);
+		await commands.get("tako-grill")?.("prd 39", ctx);
+		expect(ctx.ui.select).toHaveBeenCalledWith("Matching Work items", [
+			`PRD 39: Cycle · Brief · ATL · ${idA}`,
+			`PRD 39: Cycle · Brief · CC · ${idB}`,
+			"Search matching work items…",
+		]);
+		expect(mocks.callTool).toHaveBeenCalledWith(
+			"start_tako_grill_session",
+			{
+				project_key: "CC",
+				parent_work_item_id: idB,
+			},
+			expect.any(AbortSignal),
+		);
+	});
+
+	it("does not start a Grill when the Project chooser is cancelled", async () => {
+		const { commands } = setup();
+		mocks.callTool.mockImplementation(async (name: string) => {
+			if (name === "list_projects") return [{ key: "CC", name: "Cureocity" }];
+			throw new Error(`unexpected tool: ${name}`);
+		});
+		const ctx = commandContext();
+		await commands.get("tako-grill")?.("", ctx);
+		expect(mocks.callTool.mock.calls.map(([name]) => name)).toEqual([
+			"list_projects",
+		]);
 	});
 
 	it("records the reviewed complete repository manifest before starting the Grill prompt", async () => {
@@ -2042,7 +2123,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			clientId: "client-1",
 			sessionId: "pi-session-1",
 			sessionLabel: expect.stringContaining("PAY-142"),
-			extensionVersion: "0.4.21",
+			extensionVersion: "0.4.22",
 			manifestSchemaVersion: 2,
 			baseRefOverrides: [],
 			idempotencyKey: expect.stringMatching(

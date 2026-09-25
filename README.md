@@ -1,6 +1,6 @@
 # Tako Bridge
 
-**Current release: [v0.4.21](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.4.21).**
+**Current release: [v0.4.22](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.4.22).**
 
 Tako Bridge is Takonaut's open-source developer workflow extension for the [Pi agent harness](https://github.com/earendil-works/pi). It brings assigned Takonaut work, governed Project Context, repository verification, durable recovery, tests, human-reviewed completion evidence, and Tako Grill Work hierarchy planning into a local Pi session.
 
@@ -24,7 +24,7 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.4.21 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.4.22 -l
 ```
 
 To upgrade an existing project-local installation, run the pinned install command above, then restart Pi or run `/reload` in the existing Pi session. Version-pinned Git installs do not automatically advance to newer release tags.
@@ -37,7 +37,7 @@ To try the update and reporting flows after installing or upgrading, run in Pi:
 /tako-report
 ```
 
-**New in v0.4.21:** stable-release update indicators, cached background checks, and reviewed scope-specific upgrade instructions. Users on v0.4.20 or earlier must upgrade manually once to gain these controls; Bridge never installs upgrades automatically.
+**New in v0.4.22:** `/tako-grill` offers an authorized, searchable Project and Work hierarchy picker. Search by title or PRD number (for example `/tako-grill prd 39`) and choose among matching Work items across Projects. Stable-release update checks introduced in v0.4.21 notify existing users about this release; Bridge never installs upgrades automatically.
 
 Reporting can prepare a draft without Takonaut login or GitHub CLI. Publishing requires your GitHub account, either through authenticated `gh` or the browser form; **Save locally** works without a GitHub account.
 
@@ -109,7 +109,7 @@ Human decisions remain in Takonaut's Review queue. Approval completes the govern
 | `/tako-report [title]` | Review a sanitised public Bridge issue; submit with `gh`, open GitHub's issue form, or save a local draft. |
 | `/tako-update [check\|on\|off]` | View the latest stable release, release notes, and a reviewed scope-specific upgrade command; control automatic checks. Available starting in v0.4.21. |
 | `/tako-standup` | Draft a Standup from the current Pi session and bounded Git activity, then open the reviewed draft in Takonaut. |
-| `/tako-grill [ITEM_ID\|ITEM_URL\|cancel SESSION_ID]` | Start, resume, or cancel a private governed interview that proposes the selected Work hierarchy item's immediate children. |
+| `/tako-grill [SEARCH\|ITEM_ID\|ITEM_URL\|cancel SESSION_ID]` | Browse searchable Projects and Work hierarchy items or find a parent by phrase (e.g. `/tako-grill prd 39`); start, resume, or cancel a private governed interview. |
 
 ### Update indicator
 
@@ -167,7 +167,7 @@ Creating a Task through the governed `tako_action` path still requires `tasks.cr
 
 ### Tako Grill
 
-When **Developer Agents** and **Tako Grill** are enabled for the active organization, `/tako-grill` starts or resumes one private planning session for a Work hierarchy parent. With no argument, Bridge asks for a Project key and parent. You may instead pass the parent's ID or Takonaut URL. The Project's configured hierarchy determines the target: Tako Grill proposes only immediate children, and proposes Tasks when the parent is at the lowest configured level. It never recurses automatically.
+When **Developer Agents** and **Tako Grill** are enabled for the active organization, `/tako-grill` starts or resumes one private planning session for a Work hierarchy parent. With no argument, Bridge lists accessible Projects and then the selected Project's Work hierarchy in keyboard-accessible search dialogs. Typing narrows the server results, including beyond the first 50 entries. `/tako-grill prd 39` (or a title phrase) suggests matching parents across authorized Projects and asks you to choose when names overlap; it never guesses a Project. You may also pass the parent's ID or Takonaut URL directly. Non-TUI clients receive select/input search choices instead of a custom dialog. The Project's configured hierarchy determines the target: Tako Grill proposes only immediate children, and proposes Tasks when the parent is at the lowest configured level. It never recurses automatically.
 
 Before the interview, Bridge enumerates every active repository linked to the Project and requires each one to be available through a verified local Git root or the caller's authenticated GitHub CLI. It resolves safe refs to exact lowercase commit SHAs, collects bounded evidence at those revisions, and shows a context-consent review. Tracked local diffs require a separate opt-in and are re-collected before consent is reused. Repository content is untrusted evidence and cannot authorize tools, change routing, or issue commands.
 
