@@ -1,6 +1,8 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { BRIDGE_VERSION } from "../src/version.js";
+
 const taskContext = {
 	task: {
 		id: "task-1",
@@ -961,6 +963,42 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			"list_tako_grill_repositories",
 		]);
 		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+	});
+
+	it("reports a missing active Pi model without mislabeling it as a stale proposal", async () => {
+		const { commands } = setup();
+		const sessionId = "5228dbb1-60a7-4ea8-aa12-4b6876df7894";
+		const parentId = "876540a9-670a-47df-bc7b-c8a9253e6b24";
+		mocks.callTool.mockImplementation(async (name: string) => {
+			if (name === "start_tako_grill_session")
+				return {
+					session_id: sessionId,
+					status: "context_review",
+					context_revision: 0,
+				};
+			if (name === "get_tako_grill_context")
+				return {
+					parent: { id: parentId, title: "Checkout", level_name: "Brief" },
+					target: { kind: "work_item", level_name: "Story" },
+				};
+			throw new Error(`unexpected tool: ${name}`);
+		});
+		const notify = vi.fn();
+		const ctx = commandContext(notify);
+
+		await commands.get("tako-grill")?.(
+			`https://takonaut.app/projects/ATL/work-items/${parentId}`,
+			ctx,
+		);
+
+		expect(notify).toHaveBeenCalledWith(
+			"Tako Grill needs an active Pi model. Select a model, then run /tako-grill again.",
+			"error",
+		);
+		expect(mocks.callTool.mock.calls.map(([name]) => name)).toEqual([
+			"start_tako_grill_session",
+			"get_tako_grill_context",
+		]);
 	});
 
 	it("suggests cross-Project PRD matches and starts only the selected parent", async () => {
@@ -2123,7 +2161,7 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 			clientId: "client-1",
 			sessionId: "pi-session-1",
 			sessionLabel: expect.stringContaining("PAY-142"),
-			extensionVersion: "0.4.22",
+			extensionVersion: BRIDGE_VERSION,
 			manifestSchemaVersion: 2,
 			baseRefOverrides: [],
 			idempotencyKey: expect.stringMatching(

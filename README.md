@@ -1,6 +1,6 @@
 # Tako Bridge
 
-**Current release: [v0.4.22](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.4.22).**
+**Current release: [v0.4.23](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.4.23).**
 
 Tako Bridge is Takonaut's open-source developer workflow extension for the [Pi agent harness](https://github.com/earendil-works/pi). It brings assigned Takonaut work, governed Project Context, repository verification, durable recovery, tests, human-reviewed completion evidence, and Tako Grill Work hierarchy planning into a local Pi session.
 
@@ -24,7 +24,7 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.4.22 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.4.23 -l
 ```
 
 To upgrade an existing project-local installation, run the pinned install command above, then restart Pi or run `/reload` in the existing Pi session. Version-pinned Git installs do not automatically advance to newer release tags.
@@ -37,7 +37,7 @@ To try the update and reporting flows after installing or upgrading, run in Pi:
 /tako-report
 ```
 
-**New in v0.4.22:** `/tako-grill` offers an authorized, searchable Project and Work hierarchy picker. Search by title or PRD number (for example `/tako-grill prd 39`) and choose among matching Work items across Projects. Stable-release update checks introduced in v0.4.21 notify existing users about this release; Bridge never installs upgrades automatically.
+**New in v0.4.23:** Tako Grill now gives an actionable instruction when no Pi model is active instead of mislabeling that local preflight failure as a stale proposal. Stable-release update checks notify existing users about this release; Bridge never installs upgrades automatically.
 
 Reporting can prepare a draft without Takonaut login or GitHub CLI. Publishing requires your GitHub account, either through authenticated `gh` or the browser form; **Save locally** works without a GitHub account.
 

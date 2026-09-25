@@ -163,6 +163,19 @@ const TERMINAL_AGENTIC_STATUSES = new Set([
 ]);
 const PANEL_REFRESH_TIMEOUT_MS = 10_000;
 const RECONCILE_TIMEOUT_MS = 10_000;
+const GENERIC_GRILL_FAILURE_MESSAGE =
+	"Tako Grill could not complete safely; refresh the reviewed proposal and try again.";
+
+/** Only expose local, stable preflight failures; raw errors can contain private context. */
+function takoGrillFailureMessage(error: unknown): string {
+	if (
+		error instanceof Error &&
+		error.message === "Select a Pi model before starting Tako Grill"
+	) {
+		return "Tako Grill needs an active Pi model. Select a model, then run /tako-grill again.";
+	}
+	return GENERIC_GRILL_FAILURE_MESSAGE;
+}
 
 function idleSyncDebug(): SyncOperationDebug {
 	return {
@@ -1533,11 +1546,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				);
 			} catch (error) {
 				if (isFeatureDisabledError(error)) clearGrillReviewer();
-				note(
-					ctx,
-					"Tako Grill could not complete safely; refresh the reviewed proposal and try again.",
-					"error",
-				);
+				note(ctx, takoGrillFailureMessage(error), "error");
 			}
 		},
 	});
