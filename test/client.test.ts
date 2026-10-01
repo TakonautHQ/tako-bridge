@@ -95,9 +95,15 @@ describe("TakonautClient transport", () => {
 		});
 
 		await expect(
-			client.callTool("list_tasks", { query: "x".repeat(8_192) }),
-		).rejects.toThrow("8 KB");
+			client.callTool("list_tasks", { query: "x".repeat(256 * 1024) }),
+		).rejects.toThrow("256 KB");
 		expect(mocks.callTool).toHaveBeenCalledTimes(1);
+
+		// A 20 KB document body is within the argument bound.
+		await expect(
+			client.callTool("list_tasks", { query: "x".repeat(20 * 1024) }),
+		).resolves.toEqual({ tasks: ["PAY-1"] });
+		expect(mocks.callTool).toHaveBeenCalledTimes(2);
 	});
 
 	it("forwards lifecycle cancellation to in-flight MCP mutations", async () => {
@@ -152,9 +158,10 @@ describe("TakonautClient transport", () => {
 		})) as { truncated: boolean; preview: string };
 
 		expect(result.truncated).toBe(true);
-		expect(Buffer.byteLength(result.preview, "utf8")).toBeLessThanOrEqual(
-			512 * 1024,
-		);
+		const previewBytes = Buffer.byteLength(result.preview, "utf8");
+		expect(previewBytes).toBeLessThanOrEqual(512 * 1024);
+		expect(previewBytes).toBeGreaterThan(512 * 1024 - 4);
+		expect(result.preview).not.toContain("\uFFFD");
 	});
 
 	it("connects with Streamable HTTP and both personal-key headers", async () => {

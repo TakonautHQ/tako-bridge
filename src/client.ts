@@ -10,7 +10,8 @@ import type { CapabilityEnvelope, SignedAgenticManifest } from "./manifest";
 import { bridgeServerUrl } from "./server-url.js";
 import { BRIDGE_VERSION } from "./version.js";
 
-const GENERIC_TOOL_ARGS_LIMIT_BYTES = 8 * 1024;
+// Arguments may carry whole documents (for example create_work_document content).
+const GENERIC_TOOL_ARGS_LIMIT_BYTES = 256 * 1024;
 const GENERIC_TOOL_RESULT_LIMIT_BYTES = 512 * 1024;
 const CATALOG_SCHEMA_LIMIT_BYTES = 32 * 1024;
 const CATALOG_DESCRIPTION_LIMIT = 2_000;
@@ -53,9 +54,12 @@ function parseGenericToolResult(result: any): unknown {
 }
 
 function boundedUtf8(value: string, maxBytes: number): string {
-	let bounded = value.slice(0, maxBytes);
-	while (byteLength(bounded) > maxBytes) bounded = bounded.slice(0, -1);
-	return bounded;
+	const bytes = Buffer.from(value, "utf8");
+	if (bytes.length <= maxBytes) return value;
+	// Step back over UTF-8 continuation bytes so no character is split.
+	let end = maxBytes;
+	while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+	return bytes.subarray(0, end).toString("utf8");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -435,7 +439,7 @@ export class TakonautClient {
 		}
 		const argumentsJson = JSON.stringify(args);
 		if (byteLength(argumentsJson) > GENERIC_TOOL_ARGS_LIMIT_BYTES) {
-			throw new Error("Takonaut MCP tool arguments exceed the 8 KB limit.");
+			throw new Error("Takonaut MCP tool arguments exceed the 256 KB limit.");
 		}
 		const result = parseGenericToolResult(
 			await this.requestTool(name, args, undefined, signal),

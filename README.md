@@ -1,6 +1,6 @@
 # Tako Bridge
 
-**Current release: [v0.4.24](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.4.24).**
+**Current release: [v0.4.25](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.4.25).**
 
 Tako Bridge is Takonaut's open-source developer workflow extension for the [Pi agent harness](https://github.com/earendil-works/pi). It brings assigned Takonaut work, governed Project Context, repository verification, durable recovery, tests, human-reviewed completion evidence, and Tako Grill Work hierarchy planning into a local Pi session.
 
@@ -24,7 +24,7 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.4.24 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.4.25 -l
 ```
 
 To upgrade an existing project-local installation, run the pinned install command above, then restart Pi or run `/reload` in the existing Pi session. Version-pinned Git installs do not automatically advance to newer release tags.
@@ -37,7 +37,7 @@ To try the update and reporting flows after installing or upgrading, run in Pi:
 /tako-report
 ```
 
-**New in v0.4.24:** Takonaut MCP tool results now return up to 512 KB before truncation (previously 8 KB), so large boards, sprints, and documents come through intact. Tool arguments remain capped at 8 KB. Stable-release update checks notify existing users about this release; Bridge never installs upgrades automatically.
+**New in v0.4.25:** Takonaut MCP tool arguments now accept up to 256 KB (previously 8 KB), so large documents such as PRDs can be created and updated in one call. Truncating results over the 512 KB limit is now fast and never splits a character; v0.4.24 could hang on large non-ASCII results. Patched dependency security advisories (fast-uri, ip-address, brace-expansion, undici). Stable-release update checks notify existing users about this release; Bridge never installs upgrades automatically.
 
 Reporting can prepare a draft without Takonaut login or GitHub CLI. Publishing requires your GitHub account, either through authenticated `gh` or the browser form; **Save locally** works without a GitHub account.
 
@@ -159,7 +159,7 @@ Direct `tako_mcp_*` mutations execute immediately after server authorization, wi
 - `tako_read` runs one bounded read.
 - `tako_action` prepares a supported mutation, shows a redacted preview and argument digest, and executes only after local confirmation.
 
-Public MCP tools are deny-by-default. Platform/operator functions, organization administration, approvals, Standup submission, unreviewed legacy handlers, outbound web search, and internal Bridge protocol tools are not registered for the model. Project- and record-scoped tools repeat target-resource and ownership checks in the handler. Generic arguments and returned previews are bounded to 8 KB.
+Public MCP tools are deny-by-default. Platform/operator functions, organization administration, approvals, Standup submission, unreviewed legacy handlers, outbound web search, and internal Bridge protocol tools are not registered for the model. Project- and record-scoped tools repeat target-resource and ownership checks in the handler. Generic tool arguments are bounded to 256 KB and returned previews to 512 KB.
 
 On successful `/tako-login`, Bridge also removes `mcpServers.takonaut` from the current project's `.mcp.json` only when it is an exact HTTPS Takonaut personal-key entry. It never copies the new Bridge credential into that file, never removes unrelated MCP servers, and refuses unsafe or nonmatching files. Other saved Takonaut organization profiles remain available for organization switching.
 
