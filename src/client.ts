@@ -10,7 +10,8 @@ import type { CapabilityEnvelope, SignedAgenticManifest } from "./manifest";
 import { bridgeServerUrl } from "./server-url.js";
 import { BRIDGE_VERSION } from "./version.js";
 
-const GENERIC_TOOL_IO_LIMIT_BYTES = 8 * 1024;
+const GENERIC_TOOL_ARGS_LIMIT_BYTES = 8 * 1024;
+const GENERIC_TOOL_RESULT_LIMIT_BYTES = 512 * 1024;
 const CATALOG_SCHEMA_LIMIT_BYTES = 32 * 1024;
 const CATALOG_DESCRIPTION_LIMIT = 2_000;
 const CATALOG_TOOL_NAME = /^[a-zA-Z][a-zA-Z0-9_-]{0,127}$/;
@@ -433,17 +434,17 @@ export class TakonautClient {
 			throw new Error("Invalid Takonaut MCP tool name.");
 		}
 		const argumentsJson = JSON.stringify(args);
-		if (byteLength(argumentsJson) > GENERIC_TOOL_IO_LIMIT_BYTES) {
+		if (byteLength(argumentsJson) > GENERIC_TOOL_ARGS_LIMIT_BYTES) {
 			throw new Error("Takonaut MCP tool arguments exceed the 8 KB limit.");
 		}
 		const result = parseGenericToolResult(
 			await this.requestTool(name, args, undefined, signal),
 		);
 		const resultJson = JSON.stringify(result);
-		if (byteLength(resultJson) > GENERIC_TOOL_IO_LIMIT_BYTES) {
+		if (byteLength(resultJson) > GENERIC_TOOL_RESULT_LIMIT_BYTES) {
 			return {
 				truncated: true,
-				preview: boundedUtf8(resultJson, GENERIC_TOOL_IO_LIMIT_BYTES),
+				preview: boundedUtf8(resultJson, GENERIC_TOOL_RESULT_LIMIT_BYTES),
 			};
 		}
 		return result;

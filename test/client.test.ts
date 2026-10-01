@@ -142,7 +142,7 @@ describe("TakonautClient transport", () => {
 	it("bounds generic MCP output by UTF-8 bytes", async () => {
 		mocks.callTool.mockResolvedValue({
 			content: [
-				{ type: "text", text: JSON.stringify({ value: "🐙".repeat(4_000) }) },
+				{ type: "text", text: JSON.stringify({ value: "🐙".repeat(140_000) }) },
 			],
 		});
 		const client = new TakonautClient(cfg);
@@ -153,7 +153,7 @@ describe("TakonautClient transport", () => {
 
 		expect(result.truncated).toBe(true);
 		expect(Buffer.byteLength(result.preview, "utf8")).toBeLessThanOrEqual(
-			8 * 1024,
+			512 * 1024,
 		);
 	});
 

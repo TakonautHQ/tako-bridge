@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import type { TakonautClient, TakonautMcpTool } from "./client";
 
 const LOCAL_PREFIX = "tako_mcp_";
-const MAX_TOOL_TEXT_BYTES = 8 * 1024;
+const MAX_TOOL_TEXT_BYTES = 512 * 1024;
 const TRUNCATION_MARKER = "\n…[truncated]";
 const LEGACY_GATEWAY_TOOL_NAMES = new Set([
 	"bridge_search_capabilities",

@@ -141,10 +141,10 @@ describe("TakonautToolCatalog", () => {
 		expect(active()).not.toContain("tako_mcp_create_task");
 	});
 
-	it("keeps the final Pi-visible result within 8 KB", async () => {
+	it("keeps the final Pi-visible result within 512 KB", async () => {
 		const { catalog, client, definitions } = harness();
 		client.listTools.mockResolvedValue([remoteTool("get_task")]);
-		client.callTool.mockResolvedValue({ preview: '"'.repeat(8_192) });
+		client.callTool.mockResolvedValue({ preview: '"'.repeat(512 * 1024) });
 		await catalog.refresh();
 
 		const result = await definitions
@@ -153,7 +153,7 @@ describe("TakonautToolCatalog", () => {
 
 		expect(
 			Buffer.byteLength(result.content[0].text, "utf8"),
-		).toBeLessThanOrEqual(8_192);
+		).toBeLessThanOrEqual(512 * 1024);
 	});
 
 	it("does not register the same dynamic name twice across refreshes", async () => {
