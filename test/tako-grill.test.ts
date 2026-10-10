@@ -2114,6 +2114,99 @@ describe("Tako Grill repository evidence", () => {
 			);
 		});
 
+		it("lists proposal mockups as gallery links and drops them by field edit", async () => {
+			const grill = await loadGrillModule();
+			const Reviewer = grill.TakoGrillProposalReviewer as unknown as new (
+				dependencies: Record<string, unknown>,
+			) => Record<string, unknown>;
+			const review = grill.reviewTakoGrillProposal as (
+				input: Record<string, unknown>,
+			) => Promise<Record<string, unknown>>;
+			const mockupId = "33333333-3333-4333-8333-333333333333";
+			const actions = [
+				{
+					...action("screen", "add"),
+					title: "Checkout screen",
+					fields: { intended_outcome: "Pay", mockup_ids: [mockupId] },
+					depends_on_action_ids: [],
+				},
+			];
+			let proposalRevision = 1;
+			let proposalDigest = "c".repeat(64);
+			const callTool = vi.fn(
+				async (name: string, args: Record<string, unknown>) => {
+					if (name === "get_tako_grill_proposal") {
+						return {
+							session_id: sessionId,
+							status: "proposal_review",
+							proposal_revision: proposalRevision,
+							proposal_digest: proposalDigest,
+							summary: { intent: "Ship", desired_outcome: "Ready" },
+							accepted_unknowns: [],
+							actions,
+							total_count: 1,
+							included_mutation_count: 1,
+							action_counts: { add: 1, update: 0, keep: 0, archive: 0, conflict: 0 },
+							truncated: false,
+						};
+					}
+					if (name === "edit_tako_grill_proposal_action") {
+						proposalRevision += 1;
+						proposalDigest = "e".repeat(64);
+						Object.assign(actions[0], args.changes);
+						return {
+							session_id: sessionId,
+							status: "proposal_review",
+							proposal_revision: proposalRevision,
+							proposal_digest: proposalDigest,
+							action: actions[0],
+						};
+					}
+					return { preparation_allowed: true };
+				},
+			);
+			const reviewer = new Reviewer({ callTool });
+			let proposalSelections = 0;
+			const offered: string[][] = [];
+			const select = vi.fn(async (title: string, choices: string[]) => {
+				if (title === "Tako Grill proposal") {
+					proposalSelections += 1;
+					if (proposalSelections === 1) {
+						expect(choices.join("\n")).toContain("Mockups: 1");
+						return choices.find((choice) => choice.includes("Checkout screen"));
+					}
+					return "Finish review without applying";
+				}
+				if (title === "Tako Grill action") return "Review mockups (1)";
+				if (title === "Proposal mockups") {
+					offered.push(choices);
+					return "Drop all mockups from this action";
+				}
+				return undefined;
+			});
+
+			await expect(
+				review({
+					reviewer,
+					sessionId,
+					projectKey: "ATL",
+					serverUrl: "https://takonaut.app/mcp/",
+					ui: { select, input: vi.fn(), confirm: vi.fn(async () => true) },
+				}),
+			).resolves.toEqual({ status: "review_paused" });
+			expect(offered[0]).toContain(
+				`https://takonaut.app/projects/ATL/mockups?mockup=${mockupId}`,
+			);
+			expect(callTool).toHaveBeenCalledWith(
+				"edit_tako_grill_proposal_action",
+				expect.objectContaining({
+					action_id: "screen",
+					changes: { fields: { intended_outcome: "Pay" } },
+				}),
+				expect.any(AbortSignal),
+			);
+		});
+
 		it("invalidates in-flight reviewer operations on lifecycle teardown", async () => {
 			const grill = await loadGrillModule();
 			const Reviewer = grill.TakoGrillProposalReviewer as unknown as new (

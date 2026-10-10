@@ -23,7 +23,7 @@ function remoteTool(name: string) {
 	};
 }
 
-function harness() {
+function harness(companions: any[] = []) {
 	const definitions = new Map<string, any>();
 	let active = ["read", "unrelated_mcp_tool", "tako_search_capabilities"];
 	const pi = {
@@ -39,11 +39,51 @@ function harness() {
 		listTools: vi.fn(),
 		callTool: vi.fn(),
 	};
-	const catalog = new TakonautToolCatalog(pi as any, () => client as any);
+	const catalog = new TakonautToolCatalog(
+		pi as any,
+		() => client as any,
+		companions,
+	);
 	return { catalog, client, definitions, pi, active: () => active };
 }
 
 describe("TakonautToolCatalog", () => {
+	it("shows companion tools only while the catalog offers what they need", async () => {
+		const companion = {
+			definition: { name: "tako_context_discover", execute: vi.fn() },
+			requires: [
+				"discover_project_context",
+				"list_project_context_repositories",
+			],
+		};
+		const { catalog, client, definitions, active } = harness([companion]);
+		expect(definitions.has("tako_context_discover")).toBe(false);
+
+		client.listTools.mockResolvedValue([
+			remoteTool("discover_project_context"),
+		]);
+		await catalog.refresh();
+		expect(definitions.has("tako_context_discover")).toBe(true);
+		expect(active()).not.toContain("tako_context_discover");
+
+		client.listTools.mockResolvedValue([
+			remoteTool("discover_project_context"),
+			remoteTool("list_project_context_repositories"),
+		]);
+		await catalog.refresh();
+		expect(active()).toContain("tako_context_discover");
+		expect(catalog.offers("discover_project_context")).toBe(true);
+
+		catalog.clear();
+		expect(active()).not.toContain("tako_context_discover");
+		expect(catalog.offers("discover_project_context")).toBe(false);
+		expect(active()).toEqual([
+			"read",
+			"unrelated_mcp_tool",
+			"tako_search_capabilities",
+		]);
+	});
+
 	it("registers the authenticated catalog under stable names and preserves unrelated active tools", async () => {
 		const { catalog, client, definitions, active } = harness();
 		client.listTools.mockResolvedValue([

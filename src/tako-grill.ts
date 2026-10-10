@@ -994,6 +994,8 @@ export const TAKO_GRILL_CHILD_FIELDS = new Set([
 	"stage_id",
 	"sprint_id",
 	"task_type_name",
+	// Draft Mockups (create_mockup) embedded into the child document's Draft.
+	"mockup_ids",
 ]);
 const PROPOSAL_FETCH_SIZE = 50;
 const PROPOSAL_DISPLAY_SIZE = 20;
@@ -1761,6 +1763,45 @@ function takoGrillChildLink(
 	).toString();
 }
 
+/** Browser link to a Mockup in the project gallery; terminals cannot show images. */
+function takoGrillMockupLink(
+	serverUrl: string,
+	projectKey: string,
+	mockupId: string,
+): string {
+	if (!/^[A-Za-z0-9_-]{1,50}$/.test(projectKey) || !isProposalUuid(mockupId)) {
+		throw proposalError("invalid_mockup_link");
+	}
+	let endpoint: URL;
+	try {
+		endpoint = new URL(serverUrl);
+	} catch {
+		throw proposalError("invalid_mockup_link");
+	}
+	if (
+		(endpoint.protocol !== "https:" && endpoint.protocol !== "http:") ||
+		endpoint.username ||
+		endpoint.password
+	) {
+		throw proposalError("invalid_mockup_link");
+	}
+	const url = new URL(
+		`/projects/${encodeURIComponent(projectKey)}/mockups`,
+		endpoint.origin,
+	);
+	url.searchParams.set("mockup", mockupId);
+	return url.toString();
+}
+
+function proposalMockupIds(action: Record<string, unknown>): string[] {
+	const fields = action.fields;
+	const ids =
+		fields && typeof fields === "object" && !Array.isArray(fields)
+			? (fields as Record<string, unknown>).mockup_ids
+			: undefined;
+	return Array.isArray(ids) ? ids.filter(isProposalUuid) : [];
+}
+
 function executedTargetKind(
 	result: Record<string, unknown>,
 ): "work_item" | "task" {
@@ -1870,11 +1911,13 @@ export async function reviewTakoGrillProposal(input: {
 					`+${dependencyIds.length - dependencyLabels.length} more`,
 				);
 			}
+			const mockupCount = proposalMockupIds(action).length;
 			const provenance = [
 				requiredBy ? `Required by: ${requiredBy}` : null,
 				dependencyLabels.length > 0
 					? `Blocked by: ${dependencyLabels.join(", ")}`
 					: null,
+				mockupCount > 0 ? `Mockups: ${mockupCount}` : null,
 			].filter((value): value is string => value !== null);
 			labels.set(
 				[
@@ -1942,6 +1985,7 @@ export async function reviewTakoGrillProposal(input: {
 
 		const action = labels.get(selected);
 		if (!action || typeof action.id !== "string") continue;
+		const mockupIds = proposalMockupIds(action);
 		const operation = await input.ui.select("Tako Grill action", [
 			action.included ? "Exclude action" : "Include action",
 			"Edit child title",
@@ -1949,9 +1993,28 @@ export async function reviewTakoGrillProposal(input: {
 			action.adopt === true ? "Do not adopt item" : "Adopt managed item",
 			"Edit child fields (JSON)",
 			"Edit dependencies",
+			...(mockupIds.length > 0 ? [`Review mockups (${mockupIds.length})`] : []),
 			"Back to proposal",
 		]);
 		assertActive();
+		if (operation?.startsWith("Review mockups")) {
+			// Draft Mockups render in the browser gallery; dropping them is a
+			// reviewed field edit, so the applied child Draft never embeds them.
+			const choice = await input.ui.select("Proposal mockups", [
+				"Drop all mockups from this action",
+				...mockupIds.map((mockupId) =>
+					takoGrillMockupLink(input.serverUrl, input.projectKey, mockupId),
+				),
+				"Back to action",
+			]);
+			assertActive();
+			if (choice === "Drop all mockups from this action") {
+				const fields = { ...(action.fields as Record<string, unknown>) };
+				delete fields.mockup_ids;
+				await input.reviewer.edit(input.sessionId, action.id, { fields });
+			}
+			continue;
+		}
 		if (operation === "Include action" || operation === "Exclude action") {
 			await input.reviewer.setIncluded(
 				input.sessionId,

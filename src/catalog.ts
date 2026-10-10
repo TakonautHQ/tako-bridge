@@ -18,6 +18,16 @@ type DynamicToolApi = Pick<
 	"registerTool" | "getActiveTools" | "setActiveTools"
 >;
 
+/**
+ * A Bridge-local tool built on server tools: registered with the first
+ * catalog and active only while the active catalog offers every server tool
+ * in `requires`.
+ */
+export interface CompanionTool {
+	readonly definition: Parameters<ExtensionAPI["registerTool"]>[0];
+	readonly requires: readonly string[];
+}
+
 export interface PreparedTakonautCatalog {
 	readonly client: TakonautClient;
 	readonly tools: ReadonlyMap<string, string>;
@@ -70,7 +80,13 @@ export class TakonautToolCatalog {
 	constructor(
 		private readonly pi: DynamicToolApi,
 		private readonly getClient: () => TakonautClient | null,
+		private readonly companions: readonly CompanionTool[] = [],
 	) {}
+
+	/** Whether the active catalog offers this server tool. */
+	offers(serverName: string): boolean {
+		return [...this.active.values()].includes(serverName);
+	}
 
 	/** Validate and register definitions without changing the active catalog. */
 	async prepare(
@@ -120,6 +136,11 @@ export class TakonautToolCatalog {
 					},
 				});
 				this.registered.add(localName);
+			}
+			for (const companion of this.companions) {
+				if (this.registered.has(companion.definition.name)) continue;
+				this.pi.registerTool(companion.definition);
+				this.registered.add(companion.definition.name);
 			}
 			// Definitions are prepared but remain inactive until the caller commits
 			// the authenticated configuration and explicitly activates the catalog.
@@ -189,6 +210,16 @@ export class TakonautToolCatalog {
 			.filter((name) => !this.registered.has(name));
 		for (const name of this.active.keys()) {
 			if (!next.includes(name)) next.push(name);
+		}
+		for (const companion of this.companions) {
+			const name = companion.definition.name;
+			if (
+				this.registered.has(name) &&
+				companion.requires.every((server) => this.offers(server)) &&
+				!next.includes(name)
+			) {
+				next.push(name);
+			}
 		}
 		this.pi.setActiveTools(next);
 	}

@@ -27,12 +27,17 @@ import type {
 	ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
 import {
+	isDeviceKeyRejected,
 	TakonautClient,
 	type BridgeTaskContext,
 	type GitHubRepositoryContext,
 	type StartableTask,
 } from "./client";
 import { TakonautToolCatalog } from "./catalog";
+import { ContextBudget } from "./project-context-budget";
+import { containsSensitiveValue, redactSensitiveValues } from "./redaction";
+import { projectContextCompanions } from "./project-context-tools";
+import { registerHandoffCommands } from "./task-handoff-commands";
 import { collectLocalContext, formatLocalContextForInjection } from "./context";
 import { readAndPrepareDiagnostic } from "./diagnostics";
 import { BridgeReporter } from "./report.js";
@@ -162,6 +167,7 @@ const TERMINAL_AGENTIC_STATUSES = new Set([
 	"abandoned",
 ]);
 const PANEL_REFRESH_TIMEOUT_MS = 10_000;
+const PANEL_AUTH_REJECTED = "panel_auth_rejected";
 const RECONCILE_TIMEOUT_MS = 10_000;
 const GENERIC_GRILL_FAILURE_MESSAGE =
 	"Tako Grill could not complete safely; refresh the reviewed proposal and try again.";
@@ -225,22 +231,42 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	let grillReviewer: TakoGrillProposalReviewer | null = null;
 	let grillReviewerGeneration = -1;
 	const grillController = new TakoGrillController();
-	const toolCatalog = new TakonautToolCatalog(pi, () => client);
+	const toolCatalog = new TakonautToolCatalog(
+		pi,
+		() => client,
+		projectContextCompanions({
+			connection: (ctx) => ensure(ctx),
+			run: (command, args, options) => runner(command, args, options),
+			candidates: (ctx) => contextCheckoutCandidates(ctx),
+			defaultProjectKey: (ctx) => activeRunFor(ctx)?.projectKey ?? null,
+			budget: (ctx) => contextBudgetFor(ctx),
+			activeRun: (ctx) => {
+				const run = activeRunFor(ctx);
+				return run
+					? { runId: run.runId, sessionId: run.serverSessionId }
+					: null;
+			},
+		}),
+	);
 
 	const runner: CommandRunner = async (command, args, options) =>
 		execute(pi, command, args, options);
 	const reporter = new BridgeReporter({ run: runner });
 	const updates = new BridgeUpdates();
-	const updateCommand = new BridgeUpdateCommand(updates, () => {
-		try {
-			return bridgeInstallScope(pi.getCommands?.(), import.meta.url);
-		} catch {
-			return null;
-		}
-	});
+	const updateCommand = new BridgeUpdateCommand(
+		updates,
+		() => {
+			try {
+				return bridgeInstallScope(pi.getCommands?.(), import.meta.url);
+			} catch {
+				return null;
+			}
+		},
+		runner,
+	);
 	pi.registerCommand("tako-update", {
 		description:
-			"Check Bridge releases, review upgrade instructions, or toggle checks: /tako-update [check|on|off]",
+			"Check Bridge releases, install an update after confirmation, or toggle checks: /tako-update [check|on|off]",
 		handler: (args, ctx) => updateCommand.run(ctx, args),
 	});
 
@@ -319,6 +345,46 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		return loaded;
 	}
 
+	// One cumulative shared-context budget per Pi session.
+	const contextBudgets = new Map<string, ContextBudget>();
+	pi.on("session_compact", (_event, ctx) => {
+		contextBudgets.get(piSessionId(ctx))?.forgetProvided();
+	});
+	function contextBudgetFor(ctx: ExtensionContext): ContextBudget {
+		const sessionId = piSessionId(ctx);
+		let budget = contextBudgets.get(sessionId);
+		if (!budget) {
+			budget = ContextBudget.fromEnvironment();
+			contextBudgets.set(sessionId, budget);
+		}
+		return budget;
+	}
+
+	function activeRunFor(ctx: ExtensionContext) {
+		const c = cfg ?? loadConfig();
+		if (!c) return null;
+		try {
+			return loadActiveAgenticRun(undefined, c.orgId, piSessionId(ctx));
+		} catch {
+			return null;
+		}
+	}
+
+	// Shared Project context: the working directory first, then the active
+	// Task's checkout and mapped Project checkouts.
+	function contextCheckoutCandidates(ctx: ExtensionContext): string[] {
+		const c = cfg ?? loadConfig();
+		const activeRoot = activeRunFor(ctx)?.repoRoot;
+		return [
+			process.cwd(),
+			...(activeRoot ? [activeRoot] : []),
+			...(c ? [c.repoRoot] : []),
+			...Object.values(c?.projectRepos ?? {}).map(
+				(mapping) => mapping.repoRoot,
+			),
+		];
+	}
+
 	function piSessionId(ctx: ExtensionContext): string {
 		const sessionContext = ctx as ExtensionContext & {
 			sessionManager: { getSessionId(): string };
@@ -363,6 +429,14 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			details: {},
 		};
 	}
+
+	// Session handoff (Phase 1): /tako-handoff and /tako-resume.
+	registerHandoffCommands(pi, {
+		connection: (ctx) => ensure(ctx),
+		run: (command, args, options) => runner(command, args, options),
+		cwd: () => process.cwd(),
+		activeTaskKey: (ctx) => activeRunFor(ctx)?.taskKey ?? null,
+	});
 
 	// Stable gateway tools remain available alongside the live MCP catalog.
 	pi.registerTool({
@@ -548,6 +622,12 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		}
 	}
 
+	function renderPanelLogin(ctx: ExtensionContext): void {
+		ctx.ui.setWidget("tako-bridge-panel", (_tui, theme) =>
+			createBridgePanelLoginWidget(theme, updates.snapshot().availableVersion),
+		);
+	}
+
 	function renderPanelRefreshError(
 		ctx: ExtensionContext,
 		settings: PanelSettings,
@@ -579,6 +659,8 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					updates.snapshot().availableVersion,
 				),
 			);
+		} else if (panelSync.errorCode === PANEL_AUTH_REJECTED) {
+			renderPanelLogin(ctx);
 		} else if (panelSync.state === "error" || panelSync.state === "timeout") {
 			renderPanelRefreshError(ctx, settings);
 		} else renderCurrentPanel(ctx, cfg, settings);
@@ -643,15 +725,22 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			if (!panelActive || generation !== panelGeneration) return;
 			const timedOut =
 				error instanceof Error && error.message === "panel_refresh_timeout";
+			// An expired or revoked device key never recovers by retrying; prompt for login.
+			const authRejected = !timedOut && isDeviceKeyRejected(error);
+			let errorCode = "panel_refresh_failed";
+			if (timedOut) errorCode = "panel_refresh_timeout";
+			else if (authRejected) errorCode = PANEL_AUTH_REJECTED;
 			panelSync = {
 				...panelSync,
 				state: timedOut ? "timeout" : "error",
 				durationMs: Date.now() - startedAt,
-				errorCode: timedOut ? "panel_refresh_timeout" : "panel_refresh_failed",
+				errorCode,
 			};
 			reporter.diagnostics.record("panel", timedOut ? "timeout" : undefined);
 			const currentSettings = loadPanelSettings(c.configPath);
-			if (currentSettings.visible) {
+			if (currentSettings.visible && authRejected) {
+				renderPanelLogin(ctx);
+			} else if (currentSettings.visible) {
 				renderPanelRefreshError(ctx, currentSettings);
 			} else {
 				ctx.ui.setWidget("tako-bridge-panel", undefined);
@@ -3664,25 +3753,6 @@ function splitCommandLine(value: string): string[] {
 	while ((match = pattern.exec(value)))
 		result.push((match[1] ?? match[2] ?? match[3]).replace(/\\"/g, '"'));
 	return result;
-}
-
-const SENSITIVE_VALUE_PATTERNS = [
-	/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gi,
-	/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16})\b/g,
-	/\b(?:authorization:\s*bearer|bearer)\s+[^\s]+/gi,
-	/\b(?:--)?(?:password|passwd|secret|token|api[_-]?key)\s*(?:=|\s)\s*["']?[^\s"']{6,}/gi,
-	/\b(?:postgres(?:ql)?|mysql):\/\/[^\s:@/]+:[^\s@/]+@[^\s]+/gi,
-];
-
-function redactSensitiveValues(value: string): string {
-	return SENSITIVE_VALUE_PATTERNS.reduce(
-		(redacted, pattern) => redacted.replace(pattern, "[REDACTED]"),
-		value,
-	);
-}
-
-function containsSensitiveValue(value: string): boolean {
-	return redactSensitiveValues(value) !== value;
 }
 
 function boundedSummary(result: CommandResult): string {

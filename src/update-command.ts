@@ -1,12 +1,23 @@
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import type { CommandRunner } from "./git.js";
 import type { ReportUI } from "./report.js";
 import {
+	type BridgeRelease,
 	type BridgeUpdates,
 	bridgeReleaseUrl,
+	bridgeUpgradeArgs,
 	bridgeUpgradeCommand,
 	isNewerBridgeRelease,
 } from "./updates.js";
+
+const INSTALL_TIMEOUT_MS = 180_000;
+
+interface UpdateContext {
+	hasUI: boolean;
+	ui: ReportUI;
+	reload?: () => Promise<void>;
+}
 
 export type BridgeInstallScope = "project" | "user";
 
@@ -40,15 +51,63 @@ export function bridgeInstallScope(
 	}
 }
 
-/** Display-only upgrade instructions: the user, not a background task, runs pi install. */
+/** Installs an official release only after the user confirms the exact pi install command. */
 export class BridgeUpdateCommand {
 	private busy = false;
 	constructor(
 		private readonly updates: BridgeUpdates,
 		private readonly scope: () => BridgeInstallScope | null,
+		private readonly run_: CommandRunner,
+		private readonly cwd: () => string = () => process.cwd(),
 	) {}
 
-	async run(ctx: { hasUI: boolean; ui: ReportUI }, args = ""): Promise<void> {
+	/** Runs pi install, then confirms via `pi list` that the release tag is now pinned. */
+	private async install(
+		ctx: UpdateContext,
+		release: BridgeRelease,
+		scope: BridgeInstallScope,
+	): Promise<void> {
+		const ui = ctx.ui;
+		const cwd = this.cwd();
+		ui.notify?.(`Installing Tako Bridge ${release.tag}…`, "info");
+		const result = await this.run_("pi", bridgeUpgradeArgs(release, scope), {
+			cwd,
+			timeout: INSTALL_TIMEOUT_MS,
+		});
+		if (result.exitCode !== 0 || result.timedOut) {
+			const detail = (result.stderr || result.stdout).trim().slice(-600);
+			ui.notify?.(
+				`Update ${result.timedOut ? "timed out" : "failed"}. Your current version is unchanged.\n${detail}\n\nManual command: ${bridgeUpgradeCommand(release, scope)}`,
+				"error",
+			);
+			return;
+		}
+		const listed = await this.run_("pi", ["list"], { cwd, timeout: 30_000 });
+		const pinned = `TakonautHQ/tako-bridge@${release.tag}`;
+		if (listed.exitCode !== 0 || !listed.stdout.includes(pinned)) {
+			ui.notify?.(
+				`pi install finished, but \`pi list\` does not show ${pinned}. Check your Pi package settings before reloading.`,
+				"warning",
+			);
+			return;
+		}
+		if (
+			ctx.reload &&
+			(await ui.confirm(
+				`Tako Bridge ${release.tag} installed`,
+				"Verified with `pi list`. Reload Pi now to load the new version?",
+			))
+		) {
+			await ctx.reload();
+			return;
+		}
+		ui.notify?.(
+			`Tako Bridge ${release.tag} installed and verified. Run /reload (or restart Pi) to load the new version.`,
+			"info",
+		);
+	}
+
+	async run(ctx: UpdateContext, args = ""): Promise<void> {
 		const ui = ctx.ui;
 		if (!ctx.hasUI || this.busy) {
 			ui.notify?.(
@@ -103,7 +162,7 @@ export class BridgeUpdateCommand {
 					.filter(Boolean)
 					.join("\n");
 				const action = await ui.select(details, [
-					...(release ? ["View release notes", "Show upgrade command"] : []),
+					...(release ? ["View release notes", "Install update"] : []),
 					"Check now",
 					state.enabled
 						? "Disable automatic checks"
@@ -138,8 +197,8 @@ export class BridgeUpdateCommand {
 					);
 					continue;
 				}
-				if (action === "Show upgrade command" && release) {
-					// Never advise replacing a newer/dev version with an older release.
+				if (action === "Install update" && release) {
+					// Never replace a newer/dev version with an older release.
 					if (
 						!isNewerBridgeRelease(release.tag, this.updates.installedVersion)
 					) {
@@ -162,15 +221,13 @@ export class BridgeUpdateCommand {
 					const command = bridgeUpgradeCommand(release, scope);
 					if (
 						(await ui.confirm(
-							"Review upgrade command",
-							`${scope === "project" ? "Project-local: run from the project where Bridge is installed." : "User-wide installation."}\n${command}\nPi may reset/clean its managed package clone when changing pinned refs. Preserve any local edits first. Bridge will NOT execute this command.`,
+							"Run this command?",
+							`${command}\n\n${scope === "project" ? `Project-local install in ${this.cwd()}.` : "User-wide install."}\nPi may reset/clean its managed package clone when changing pinned refs. Preserve any local edits first.`,
 						)) &&
 						current()
 					) {
-						ui.notify?.(
-							`${command}\n\nRun this yourself from ${scope === "project" ? "the original project directory" : "a terminal"}, then restart Pi or run /reload. No installation was performed.`,
-							"info",
-						);
+						await this.install(ctx, release, scope);
+						return;
 					}
 				}
 			}

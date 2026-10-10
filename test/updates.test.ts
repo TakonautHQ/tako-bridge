@@ -400,34 +400,111 @@ describe("owner-only separate settings and cache", () => {
 	});
 });
 
-describe("reviewed manual upgrade command", () => {
+function installRunner(listOutput = "git:github.com/TakonautHQ/tako-bridge@v0.4.21") {
+	return vi.fn(async (_command: string, args: string[]) =>
+		args[0] === "list"
+			? { stdout: listOutput, stderr: "", exitCode: 0 }
+			: { stdout: "installed", stderr: "", exitCode: 0 },
+	);
+}
+
+describe("confirmed upgrade installation", () => {
 	it.each(["project", "user"] as const)(
-		"preserves %s scope and does not execute installation",
+		"installs with %s scope only after confirmation, verifies, then offers reload",
 		async (scope) => {
 			const f = fixture();
 			const view = ui();
-			view.select.mockResolvedValueOnce("Show upgrade command");
-			const command = new BridgeUpdateCommand(f.updates, () => scope);
-			await command.run({ hasUI: true, ui: view });
-			expect(view.confirm).toHaveBeenCalledWith(
-				"Review upgrade command",
+			const run = installRunner();
+			const reload = vi.fn(async () => {});
+			view.select.mockResolvedValueOnce("Install update");
+			view.confirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+			const command = new BridgeUpdateCommand(
+				f.updates,
+				() => scope,
+				run,
+				() => "/repo",
+			);
+			await command.run({ hasUI: true, ui: view, reload });
+			expect(view.confirm).toHaveBeenNthCalledWith(
+				1,
+				"Run this command?",
 				expect.stringContaining(
 					scope === "project" ? "v0.4.21 -l" : "v0.4.21\n",
 				),
 			);
-			expect(view.notify).toHaveBeenCalledWith(
-				expect.stringContaining("No installation was performed"),
-				"info",
+			expect(run).toHaveBeenNthCalledWith(
+				1,
+				"pi",
+				[
+					"install",
+					"git:github.com/TakonautHQ/tako-bridge@v0.4.21",
+					...(scope === "project" ? ["-l"] : []),
+				],
+				expect.objectContaining({ cwd: "/repo" }),
 			);
+			expect(run).toHaveBeenNthCalledWith(2, "pi", ["list"], expect.anything());
+			expect(reload).toHaveBeenCalledOnce();
 		},
 	);
+	it("does not execute anything when the command is declined", async () => {
+		const f = fixture();
+		const view = ui();
+		const run = installRunner();
+		view.select.mockResolvedValueOnce("Install update");
+		view.confirm.mockResolvedValueOnce(false);
+		await new BridgeUpdateCommand(f.updates, () => "user", run).run({
+			hasUI: true,
+			ui: view,
+		});
+		expect(run).not.toHaveBeenCalled();
+	});
+	it("reports a failed install with the manual command and skips reload", async () => {
+		const f = fixture();
+		const view = ui();
+		const run = vi.fn(async () => ({
+			stdout: "",
+			stderr: "network down",
+			exitCode: 1,
+		}));
+		const reload = vi.fn(async () => {});
+		view.select.mockResolvedValueOnce("Install update");
+		view.confirm.mockResolvedValueOnce(true);
+		await new BridgeUpdateCommand(f.updates, () => "user", run).run({
+			hasUI: true,
+			ui: view,
+			reload,
+		});
+		expect(view.notify).toHaveBeenCalledWith(
+			expect.stringContaining("network down"),
+			"error",
+		);
+		expect(reload).not.toHaveBeenCalled();
+	});
+	it("warns instead of reloading when pi list does not show the new tag", async () => {
+		const f = fixture();
+		const view = ui();
+		const run = installRunner("git:github.com/TakonautHQ/tako-bridge@v0.4.20");
+		const reload = vi.fn(async () => {});
+		view.select.mockResolvedValueOnce("Install update");
+		view.confirm.mockResolvedValueOnce(true);
+		await new BridgeUpdateCommand(f.updates, () => "user", run).run({
+			hasUI: true,
+			ui: view,
+			reload,
+		});
+		expect(view.notify).toHaveBeenCalledWith(
+			expect.stringContaining("does not show"),
+			"warning",
+		);
+		expect(reload).not.toHaveBeenCalled();
+	});
 	it("requires an explicit scope for unknown/local installs and honours cancellation", async () => {
 		const f = fixture();
 		const view = ui();
 		view.select
-			.mockResolvedValueOnce("Show upgrade command")
+			.mockResolvedValueOnce("Install update")
 			.mockResolvedValueOnce("Cancel");
-		await new BridgeUpdateCommand(f.updates, () => null).run({
+		await new BridgeUpdateCommand(f.updates, () => null, vi.fn()).run({
 			hasUI: true,
 			ui: view,
 		});
@@ -439,7 +516,7 @@ describe("reviewed manual upgrade command", () => {
 		const view = ui();
 		view.select.mockResolvedValueOnce("View release notes");
 		view.editor.mockResolvedValue("run evil shell command");
-		await new BridgeUpdateCommand(f.updates, () => "project").run({
+		await new BridgeUpdateCommand(f.updates, () => "project", vi.fn()).run({
 			hasUI: true,
 			ui: view,
 		});
@@ -453,7 +530,7 @@ describe("reviewed manual upgrade command", () => {
 		const f = fixture();
 		const view = ui();
 		view.confirm.mockResolvedValueOnce(false);
-		const command = new BridgeUpdateCommand(f.updates, () => "project");
+		const command = new BridgeUpdateCommand(f.updates, () => "project", vi.fn());
 		await command.run({ hasUI: true, ui: view }, "off");
 		expect(f.storage.writeSettings).not.toHaveBeenCalled();
 		await command.run({ hasUI: true, ui: view }, "off");
@@ -463,24 +540,26 @@ describe("reviewed manual upgrade command", () => {
 		});
 		expect(f.fetcher).not.toHaveBeenCalled();
 	});
-	it("does not show a command after declined confirmation or shutdown", async () => {
+	it("does not install after shutdown during confirmation", async () => {
 		const f = fixture();
 		const view = ui();
-		view.select.mockResolvedValueOnce("Show upgrade command");
+		const run = installRunner();
+		view.select.mockResolvedValueOnce("Install update");
 		view.confirm.mockImplementation(async () => {
 			f.updates.stop();
 			return true;
 		});
-		await new BridgeUpdateCommand(f.updates, () => "project").run({
+		await new BridgeUpdateCommand(f.updates, () => "project", run).run({
 			hasUI: true,
 			ui: view,
 		});
+		expect(run).not.toHaveBeenCalled();
 		expect(view.notify).not.toHaveBeenCalled();
 	});
 	it("avoids network and dialogs in noninteractive mode", async () => {
 		const f = fixture();
 		const view = ui();
-		await new BridgeUpdateCommand(f.updates, () => "user").run({
+		await new BridgeUpdateCommand(f.updates, () => "user", vi.fn()).run({
 			hasUI: false,
 			ui: view,
 		});

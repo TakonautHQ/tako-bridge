@@ -1,6 +1,6 @@
 # Tako Bridge
 
-**Current release: [v0.4.25](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.4.25).**
+**Current release: [v0.4.26](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.4.26).**
 
 Tako Bridge is Takonaut's open-source developer workflow extension for the [Pi agent harness](https://github.com/earendil-works/pi). It brings assigned Takonaut work, governed Project Context, repository verification, durable recovery, tests, human-reviewed completion evidence, and Tako Grill Work hierarchy planning into a local Pi session.
 
@@ -24,7 +24,7 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.4.25 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.4.26 -l
 ```
 
 To upgrade an existing project-local installation, run the pinned install command above, then restart Pi or run `/reload` in the existing Pi session. Version-pinned Git installs do not automatically advance to newer release tags.
@@ -37,7 +37,9 @@ To try the update and reporting flows after installing or upgrading, run in Pi:
 /tako-report
 ```
 
-**New in v0.4.25:** Takonaut MCP tool arguments now accept up to 256 KB (previously 8 KB), so large documents such as PRDs can be created and updated in one call. Truncating results over the 512 KB limit is now fast and never splits a character; v0.4.24 could hang on large non-ASCII results. Patched dependency security advisories (fast-uri, ip-address, brace-expansion, undici). Stable-release update checks notify existing users about this release; Bridge never installs upgrades automatically.
+**New in v0.4.26:** `/tako-update` can now install a newer release for you: it shows the exact `pi install` command, runs it only after you confirm, verifies the result with `pi list`, and offers to reload Pi. When your device key expires or is revoked, the panel now asks you to sign in with `/tako-login` instead of retrying forever. Also new: session handoff (`/tako-handoff`, `/tako-resume`) and shared Project context tools with a per-session budget.
+
+**v0.4.25:** Takonaut MCP tool arguments accept up to 256 KB (previously 8 KB), and truncating results over the 512 KB limit is fast and never splits a character. Patched dependency security advisories (fast-uri, ip-address, brace-expansion, undici).
 
 Reporting can prepare a draft without Takonaut login or GitHub CLI. Publishing requires your GitHub account, either through authenticated `gh` or the browser form; **Save locally** works without a GitHub account.
 
@@ -127,7 +129,7 @@ Included starting in **v0.4.21**. In interactive sessions, Bridge checks the pub
 /tako-update on     # confirm enabling automatic checks, user-wide
 ```
 
-**Show upgrade command** preserves the active official package's project-local (`-l`) or user-wide scope when Pi's source metadata identifies it. Unknown, local-checkout, temporary, forked, or ambiguous installations require an explicit scope choice. A confirmation shows the exact pinned command and warns that Pi may reset/clean its managed package clone when changing refs. **Bridge does not execute the installer**: run the reviewed command yourself, from the original project directory for a local install, then restart Pi or run `/reload`. There is no automatic update or downgrade. Preserve local changes to managed package clones before upgrading.
+**Install update** preserves the active official package's project-local (`-l`) or user-wide scope when Pi's source metadata identifies it. Unknown, local-checkout, temporary, forked, or ambiguous installations require an explicit scope choice. A confirmation shows the exact pinned `pi install` command and warns that Pi may reset/clean its managed package clone when changing refs. **Nothing runs until you confirm.** Bridge then runs the command from the current project directory, checks with `pi list` that the new tag is pinned, and offers to `/reload` Pi. If the install fails or can't be verified, Bridge shows the error and the manual command and does not reload. There is no automatic background update or downgrade. Preserve local changes to managed package clones before upgrading.
 
 Release notes are displayed as bounded, untrusted text outside the model conversation; editing the viewer cannot change the target version or upgrade command. The generated link and command always point to the official `TakonautHQ/tako-bridge` repository.
 
@@ -164,6 +166,21 @@ Public MCP tools are deny-by-default. Platform/operator functions, organization 
 On successful `/tako-login`, Bridge also removes `mcpServers.takonaut` from the current project's `.mcp.json` only when it is an exact HTTPS Takonaut personal-key entry. It never copies the new Bridge credential into that file, never removes unrelated MCP servers, and refuses unsafe or nonmatching files. Other saved Takonaut organization profiles remain available for organization switching.
 
 Creating a Task through the governed `tako_action` path still requires `tasks.create` on the selected Project and an active Sprint; Kanban Projects and Projects without an active Sprint are refused. Personal MCP-created Tasks default to the authenticated member as owner and retain the selected Stage's Track so later Stage moves resolve against the configured Delivery flow. Prepared actions expire after five minutes, are bound to the exact user, organization, device key, capability, and arguments, and are replay-safe across server workers.
+
+### Shared Project context
+
+When an administrator has enabled shared Project context for a repository (a customer Runner indexes its default branch; see Takonaut's Project settings), Bridge activates two local tools alongside the catalog:
+
+- `tako_context_discover` finds files and symbols in the repository's shared structure index. It maps the working directory (or the active Task's or a mapped Project checkout) to the Project repository by its `origin` remote, sends only the local `HEAD` commit, and reports how the checkout relates to the indexed commit: `same_commit`, `local_ahead`, `local_behind`, `diverged`, or `indexed_commit_missing`, plus whether tracked files are modified. Results are ranked, not exhaustive; `not_ready` means search the checkout instead.
+- `tako_context_expand` expands returned references (spans, hashes, parent, children, relations) and verifies each against local bytes: `match` (file identical), `span_match` (file changed, the definition's bytes identical at the same offsets; `local.lines` gives its current lines), `modified`, `missing`, or `unverifiable` (unsafe path, symlink, special or too large file). Rely only on `match` and `span_match` spans; read the file otherwise.
+
+Each Pi session has a cumulative shared-context budget (1 MiB of results by default; `TAKONAUT_CONTEXT_BUDGET_BYTES`, 16 KiB to 4 MiB): evidence already returned in the session comes back as `already_provided` with fresh local verification, and once the budget is spent the tools return `context_budget_exhausted` so the agent searches locally. Compaction makes earlier evidence available in full again; the budget resets when Pi reloads the extension. Pass `project_key` unless a Task is running. Hashes cover Git blob bytes, so line-ending conversion in the working tree reads as `modified`. Verification reads files only inside the checkout, never follows symlinks, and re-checks the opened file. Repositories are matched by owner and name, so Projects with many repositories work too.
+
+### Session handoff
+
+`/tako-handoff PAY-12` shares where you got to on a Task. Bridge asks your agent to draft a summary (work done and learned, decisions, plan, open questions, files touched), adds the repository state (remote, branch, commit, local changes), redacts secrets and opens the pack for you to review and edit. You choose who may see it (everyone in the Project, or named Project members) and confirm before anything is uploaded. Your session itself is never uploaded. `/tako-handoff withdraw HANDOFF_ID` withdraws one and erases its content.
+
+`/tako-resume PAY-12` starts a new Pi session seeded with a handoff you may see, on your own model. If your checkout differs from the author's (repository, branch, commit, or their uncommitted changes), the session is told to re-read files rather than trust the summary. A handoff is evidence about past work, not instructions.
 
 ### Tako Grill
 

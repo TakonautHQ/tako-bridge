@@ -160,6 +160,9 @@ vi.mock("../src/config", () => ({
 }));
 
 vi.mock("../src/client", () => ({
+	isDeviceKeyRejected: (error: unknown) =>
+		error instanceof Error &&
+		[401, 403].includes((error as { code?: number }).code ?? 0),
 	TakonautClient: class {
 		close = mocks.close;
 		listTools = mocks.listTools;
@@ -763,6 +766,22 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		expect(mocks.stopUpdates).toHaveBeenCalledOnce();
 	});
 
+	it("prompts for login instead of retrying when the device key is rejected", async () => {
+		const { events } = setup();
+		const ctx = { ...commandContext(), mode: "tui" };
+		mocks.panelSettings.refreshSeconds = 0;
+		mocks.listStartableTasks.mockRejectedValueOnce(
+			Object.assign(new Error("device key expired"), { code: 401 }),
+		);
+		await events.get("session_start")?.({}, ctx);
+		const panel = renderPanel(ctx).join("\n");
+		expect(panel).toContain("SIGN IN");
+		expect(panel).not.toContain("Refresh failed");
+		mocks.startUpdates.mock.calls[0][0]();
+		expect(renderPanel(ctx).join("\n")).toContain("SIGN IN");
+		await events.get("session_shutdown")?.({}, ctx);
+	});
+
 	it("keeps update rendering local, preserves a panel error, and respects panel visibility", async () => {
 		const { events } = setup();
 		const ctx = { ...commandContext(), mode: "tui" };
@@ -1287,6 +1306,88 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 
 		expect(tools.has("tako_mcp_list_tasks")).toBe(true);
 		expect(activeTools()).toContain("tako_mcp_list_tasks");
+	});
+
+	it("activates shared Project context tools with the server tools they use", async () => {
+		mocks.listTools.mockResolvedValue(
+			[
+				"list_project_context_repositories",
+				"discover_project_context",
+				"expand_project_evidence",
+			].map((name) => ({
+				name,
+				description: name,
+				inputSchema: { type: "object", properties: {} },
+			})),
+		);
+		mocks.callTool.mockImplementation(async (name: string) => {
+			if (name === "list_project_context_repositories") {
+				return {
+					repositories: [
+						{
+							repository_id: "repo-1",
+							owner: "takonaut",
+							name: "api",
+							status: "ready",
+							commit: null,
+						},
+					],
+					truncated: false,
+				};
+			}
+			if (name === "expand_project_evidence") {
+				throw new Error("project_context:stale_view");
+			}
+			return { status: "not_ready", fallback: "local" };
+		});
+		const { events, tools, activeTools } = setup();
+		const ctx = { ...commandContext(), mode: "rpc" };
+		await events.get("session_start")?.({}, ctx);
+
+		expect(activeTools()).toEqual(
+			expect.arrayContaining(["tako_context_discover", "tako_context_expand"]),
+		);
+		const parse = (result: any) => JSON.parse(result.content[0].text);
+		const discover = tools.get("tako_context_discover");
+		expect(
+			parse(
+				await discover.execute(
+					"call-1",
+					{ query: "helper", project_key: "PAY", repository_id: "repo-1" },
+					undefined,
+					undefined,
+					ctx,
+				),
+			),
+		).toEqual({
+			status: "not_ready",
+			fallback: "local",
+			local: { checkout: "missing" },
+		});
+		expect(
+			parse(
+				await discover.execute(
+					"call-2",
+					{ query: "helper" },
+					undefined,
+					undefined,
+					ctx,
+				),
+			),
+		).toEqual({ error: "project_key_required" });
+		expect(
+			parse(
+				await tools
+					.get("tako_context_expand")
+					.execute(
+						"call-3",
+						{ project_key: "PAY", context_view_id: "view-1", refs: ["s:1"] },
+						undefined,
+						undefined,
+						ctx,
+					),
+			),
+		).toEqual({ error: "stale_view" });
 	});
 
 	it("verifies login, replaces the exact legacy MCP entry, and activates the new catalog", async () => {

@@ -77,12 +77,23 @@ export function bridgeReleaseUrl(release: BridgeRelease): string {
 	if (!STABLE_TAG.test(release.tag)) throw new Error("Invalid release tag");
 	return `https://github.com/TakonautHQ/tako-bridge/releases/tag/${release.tag}`;
 }
+/** Arguments for `pi`; the tag is validated so it can never inject extra arguments. */
+export function bridgeUpgradeArgs(
+	release: BridgeRelease,
+	scope: "project" | "user",
+): string[] {
+	if (!STABLE_TAG.test(release.tag)) throw new Error("Invalid release tag");
+	return [
+		"install",
+		`git:github.com/TakonautHQ/tako-bridge@${release.tag}`,
+		...(scope === "project" ? ["-l"] : []),
+	];
+}
 export function bridgeUpgradeCommand(
 	release: BridgeRelease,
 	scope: "project" | "user",
 ): string {
-	if (!STABLE_TAG.test(release.tag)) throw new Error("Invalid release tag");
-	return `pi install git:github.com/TakonautHQ/tako-bridge@${release.tag}${scope === "project" ? " -l" : ""}`;
+	return ["pi", ...bridgeUpgradeArgs(release, scope)].join(" ");
 }
 
 async function boundedReleaseBody(response: Response): Promise<unknown> {

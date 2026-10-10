@@ -17,6 +17,13 @@ const CATALOG_SCHEMA_LIMIT_BYTES = 32 * 1024;
 const CATALOG_DESCRIPTION_LIMIT = 2_000;
 const CATALOG_TOOL_NAME = /^[a-zA-Z][a-zA-Z0-9_-]{0,127}$/;
 
+/** True when the server rejected the device key (expired, revoked, or invalid). */
+export function isDeviceKeyRejected(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	const code = (error as { code?: unknown }).code;
+	return code === 401 || code === 403;
+}
+
 function byteLength(value: string): number {
 	return Buffer.byteLength(value, "utf8");
 }
@@ -44,7 +51,15 @@ function parseToolJson(result: any): any {
 	}
 }
 
-function parseGenericToolResult(result: any): unknown {
+type GenericToolResult =
+	| string
+	| number
+	| boolean
+	| null
+	| GenericToolResult[]
+	| { [key: string]: GenericToolResult };
+
+function parseGenericToolResult(result: any): GenericToolResult {
 	const text = ensureToolSuccess(result);
 	try {
 		return JSON.parse(text || "{}");
