@@ -110,6 +110,19 @@ import { PanelSettingsView } from "./panel-settings.js";
 import { normalizeBridgeApiBaseUrl } from "./server-url.js";
 import { parseStartArguments } from "./start";
 import { TaskPicker } from "./task-picker.js";
+import { AgentMetricsTracker } from "./agent-metrics.js";
+import {
+	detectWorkLinkCandidate,
+	loadRecentLinks,
+	readGitWorkContext,
+	recentLinksPath,
+	saveRecentLink,
+	suggestBranchName,
+	type WorkLinkMode,
+	type WorkLinkResult,
+	type WorkLinkSource,
+	WorkLinkController,
+} from "./work-link.js";
 import {
 	cleanupAgenticWorktree,
 	provisionAgenticWorktrees,
@@ -252,6 +265,26 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	const runner: CommandRunner = async (command, args, options) =>
 		execute(pi, command, args, options);
 	const reporter = new BridgeReporter({ run: runner });
+	const workLink = new WorkLinkController({
+		onHeartbeatError: () => reporter.diagnostics.record("connection"),
+	});
+	let workLinkMode: WorkLinkMode = "nudge";
+	const agentMetrics = new AgentMetricsTracker();
+	pi.on("agent_start", () => agentMetrics.onAgentStart());
+	pi.on("agent_end", () => agentMetrics.onAgentIdle());
+	pi.on("turn_end", (event: { message?: unknown }) =>
+		agentMetrics.onTurnEnd(event?.message),
+	);
+	pi.on(
+		"tool_execution_start",
+		(event: { toolName: string; args?: unknown }) =>
+			agentMetrics.onToolStart(event.toolName, event.args),
+	);
+	pi.on(
+		"tool_execution_end",
+		(event: { toolName: string; isError?: boolean }) =>
+			agentMetrics.onToolEnd(event.toolName, !!event.isError),
+	);
 	const updates = new BridgeUpdates();
 	const updateCommand = new BridgeUpdateCommand(
 		updates,
@@ -916,6 +949,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 							reportedStatus: current.executorPhase,
 							startedAt: current.startedAt,
 							lastActivityAt: current.lastActivityAt,
+							...agentMetrics.snapshot(),
 						},
 					],
 				};
@@ -2037,6 +2071,235 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				note(ctx, `Failed to list work: ${errMsg(error)}`, "error");
 			}
 		},
+	});
+
+	function describeWorkLink(result: WorkLinkResult): string {
+		const subject = result.task_key
+			? `Working on ${result.task_key} · ${result.task_title ?? ""}`.trim()
+			: `Working without a Task (${result.no_task_reason})`;
+		const moved = result.moved_to ? `\nMoved to ${result.moved_to}.` : "";
+		const warnings = result.warnings.length
+			? `\n${result.warnings.join("\n")}`
+			: "";
+		return `${subject}${moved}${warnings}`;
+	}
+
+	async function linkWork(
+		ctx: ExtensionContext,
+		c: TakonautConfig,
+		conn: TakonautClient,
+		input: { taskKey?: string; noTaskReason?: string; linkSource: WorkLinkSource },
+	): Promise<WorkLinkResult> {
+		const git = await readGitWorkContext(runner, process.cwd());
+		const result = await workLink.link(conn, {
+			...input,
+			piSessionId: piSessionId(ctx),
+			branchName: git.branch ?? undefined,
+			repository: git.repository ?? git.repoRoot ?? undefined,
+		});
+		if (result.task_key && git.repoRoot) {
+			try {
+				saveRecentLink(recentLinksPath(c.orgId), git.repoRoot, result.task_key);
+			} catch {
+				// Remembering the last link is a convenience only.
+			}
+		}
+		return result;
+	}
+
+	/** Link from the active Run or branch; ask before reusing the last link. */
+	async function autoLinkWork(
+		ctx: ExtensionContext,
+		c: TakonautConfig,
+		conn: TakonautClient,
+		activeRunTaskKey: string | null,
+	): Promise<void> {
+		const git = await readGitWorkContext(runner, process.cwd());
+		if (git.repository) {
+			try {
+				workLinkMode = (await conn.getBridgeWorkPolicy(git.repository))
+					.work_link_mode;
+			} catch {
+				workLinkMode = "nudge";
+			}
+		}
+		const candidate = detectWorkLinkCandidate({
+			activeRunTaskKey,
+			git,
+			recent: loadRecentLinks(recentLinksPath(c.orgId)),
+		});
+		if (!candidate) return;
+		if (candidate.source === "recent") {
+			if (!ctx.hasUI) return;
+			const ok = await ctx.ui.confirm(
+				"Link Task",
+				`Continue working on ${candidate.taskKey}?`,
+			);
+			if (!ok) return;
+		}
+		try {
+			const result = await linkWork(ctx, c, conn, {
+				taskKey: candidate.taskKey,
+				linkSource: candidate.source,
+			});
+			note(ctx, describeWorkLink(result));
+		} catch {
+			// Unknown or unassigned key (e.g. a release-2026 branch): fall back
+			// to the link nudge rather than failing session start.
+		}
+	}
+
+	async function pickTaskKey(
+		ctx: ExtensionContext,
+		conn: TakonautClient,
+	): Promise<string | null> {
+		const { tasks } = await conn.listStartableTasks();
+		if (!tasks?.length || ctx.mode !== "tui") return null;
+		return ctx.ui.custom<string | null>(
+			(tui, theme, _keybindings, done) =>
+				new TaskPicker(tasks, theme, {
+					onSelect: done,
+					onCancel: () => done(null),
+					onChange: () => tui.requestRender(),
+				}),
+			{
+				overlay: true,
+				overlayOptions: {
+					anchor: "center",
+					width: "75%",
+					minWidth: 56,
+					maxHeight: "70%",
+					margin: 1,
+				},
+			},
+		);
+	}
+
+	pi.registerCommand("tako-link", {
+		description:
+			"Link this session to the Task you are working on: /tako-link [TASK-KEY | --none REASON]",
+		handler: async (args, ctx) => {
+			const c = currentConfig(ctx);
+			const conn = ensure(ctx);
+			if (!c || !conn) return;
+			const text = (args ?? "").trim();
+			try {
+				let input: { taskKey?: string; noTaskReason?: string; linkSource: WorkLinkSource };
+				if (text.startsWith("--none")) {
+					const reason =
+						text.slice("--none".length).trim() ||
+						(ctx.hasUI
+							? ((await ctx.ui.input(
+									"Working without a Task",
+									"investigation, support, review…",
+								)) ?? "")
+							: "");
+					if (!reason.trim()) {
+						return note(ctx, "Give a reason: /tako-link --none REASON", "error");
+					}
+					input = { noTaskReason: reason, linkSource: "command" };
+				} else if (text) {
+					input = { taskKey: text.split(/\s+/)[0], linkSource: "command" };
+				} else {
+					const taskKey = await pickTaskKey(ctx, conn);
+					if (!taskKey) {
+						return note(
+							ctx,
+							"No Task selected. Use /tako-link TASK-KEY or /tako-link --none REASON.",
+						);
+					}
+					input = { taskKey, linkSource: "picker" };
+				}
+				const result = await linkWork(ctx, c, conn, input);
+				const git = await readGitWorkContext(runner, process.cwd());
+				const branchHint =
+					result.task_key &&
+					result.task_title &&
+					git.branch &&
+					!git.branch.toUpperCase().includes(result.task_key)
+						? `\nTip: use a branch like ${suggestBranchName(result.task_key, result.task_title)} so PRs link to ${result.task_key} automatically.`
+						: "";
+				note(ctx, describeWorkLink(result) + branchHint);
+			} catch (error) {
+				note(ctx, `Failed to link work: ${errMsg(error)}`, "error");
+			}
+		},
+	});
+
+	pi.registerCommand("tako-unlink", {
+		description: "Stop tracking time against the linked Task",
+		handler: async (_args, ctx) => {
+			const conn = ensure(ctx);
+			const current = workLink.snapshot();
+			try {
+				const ended = await workLink.end(conn, piSessionId(ctx), "unlinked");
+				note(
+					ctx,
+					ended
+						? `Unlinked ${current?.taskKey ?? "work without a Task"}.`
+						: "This session is not linked to a Task.",
+				);
+			} catch (error) {
+				note(ctx, `Failed to unlink: ${errMsg(error)}`, "error");
+			}
+		},
+	});
+
+	/** Required mode: pick a Task or give a reason before the prompt runs. */
+	async function requireWorkLink(ctx: ExtensionContext): Promise<boolean> {
+		const c = currentConfig(ctx);
+		const conn = ensure(ctx);
+		if (!c || !conn) return false;
+		try {
+			const taskKey = await pickTaskKey(ctx, conn);
+			if (taskKey) {
+				note(ctx, describeWorkLink(await linkWork(ctx, c, conn, { taskKey, linkSource: "picker" })));
+				return true;
+			}
+			if (!ctx.hasUI) return false;
+			const reason = (
+				(await ctx.ui.input(
+					"This project requires a linked Task. Working without one? Give a reason",
+					"investigation, support, review…",
+				)) ?? ""
+			).trim();
+			if (!reason) return false;
+			note(
+				ctx,
+				describeWorkLink(
+					await linkWork(ctx, c, conn, { noTaskReason: reason, linkSource: "picker" }),
+				),
+			);
+			return true;
+		} catch (error) {
+			note(ctx, `Failed to link work: ${errMsg(error)}`, "error");
+			return false;
+		}
+	}
+
+	// Nudge: remind once per session. Required: block until linked.
+	pi.on("input", async (event, ctx) => {
+		if (event.source !== "interactive" || !cfg || workLinkMode === "off") {
+			return { action: "continue" };
+		}
+		if (workLink.snapshot()) return { action: "continue" };
+		if (workLinkMode === "required") {
+			if (await requireWorkLink(ctx)) return { action: "continue" };
+			note(
+				ctx,
+				"This project requires a linked Task before prompting. Run /tako-link TASK-KEY or /tako-link --none REASON.",
+				"error",
+			);
+			return { action: "handled" };
+		}
+		if (workLink.shouldNudge()) {
+			note(
+				ctx,
+				"No Task linked to this session. Run /tako-link to pick one (or /tako-link --none REASON).",
+				"warning",
+			);
+		}
+		return { action: "continue" };
 	});
 
 	pi.registerCommand("tako-start", {
@@ -3546,6 +3809,11 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			);
 		}
 		const active = loadActiveAgenticRun(undefined, c.orgId, piSessionId(ctx));
+		workLink.reset();
+		agentMetrics.reset();
+		void autoLinkWork(ctx, c, startupClient, active?.taskKey ?? null).catch(
+			() => reporter.diagnostics.record("connection"),
+		);
 		if (!active) return;
 		note(
 			ctx,
@@ -3572,6 +3840,11 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		stopAgentTelemetry();
 		toolCatalog.clear();
 		const previousClient = client;
+		try {
+			await workLink.end(previousClient, piSessionId(ctx), "shutdown");
+		} catch {
+			// The server closes stale links on the next link from this session.
+		}
 		client = null;
 		cfg = null;
 		if (previousClient) await previousClient.close();

@@ -9,6 +9,19 @@ import type { AgenticWorkspaceCompletionEvidence } from "./git";
 import type { CapabilityEnvelope, SignedAgenticManifest } from "./manifest";
 import { bridgeServerUrl } from "./server-url.js";
 import { BRIDGE_VERSION } from "./version.js";
+import type { WorkLinkResult, WorkLinkSource } from "./work-link";
+
+/** Omit unset optional metrics so older snapshots keep their exact shape. */
+function definedMetrics(
+	metrics: Record<string, string | number | null | undefined>,
+): Record<string, string | number> {
+	return Object.fromEntries(
+		Object.entries(metrics).filter(
+			(entry): entry is [string, string | number] =>
+				entry[1] !== undefined && entry[1] !== null,
+		),
+	);
+}
 
 // Arguments may carry whole documents (for example create_work_document content).
 const GENERIC_TOOL_ARGS_LIMIT_BYTES = 256 * 1024;
@@ -329,6 +342,14 @@ export interface AgentTelemetryInstance {
 	reportedStatus: string;
 	startedAt: string;
 	lastActivityAt: string;
+	currentActivity?: string | null;
+	lastTool?: string | null;
+	toolCalls?: number;
+	turns?: number;
+	tokensIn?: number;
+	tokensOut?: number;
+	costUsd?: number;
+	lastError?: string | null;
 }
 
 export interface AgentTelemetrySnapshot {
@@ -477,6 +498,53 @@ export class TakonautClient {
 			"list_startable_tasks",
 			{ project_key: projectKey },
 			timeoutMs,
+		);
+	}
+
+	linkWorkSession(input: {
+		piSessionId: string;
+		taskKey?: string;
+		noTaskReason?: string;
+		linkSource: WorkLinkSource;
+		branchName?: string;
+		repository?: string;
+	}): Promise<WorkLinkResult> {
+		return this.call(
+			"link_bridge_work_session",
+			{
+				pi_session_id: input.piSessionId,
+				task_key: input.taskKey ?? "",
+				no_task_reason: input.noTaskReason ?? "",
+				link_source: input.linkSource,
+				branch_name: input.branchName ?? "",
+				repository: input.repository ?? "",
+			},
+			10_000,
+		);
+	}
+
+	getBridgeWorkPolicy(
+		repository: string,
+	): Promise<{ work_link_mode: "off" | "nudge" | "required" }> {
+		return this.call("get_bridge_work_policy", { repository }, 10_000);
+	}
+
+	heartbeatWorkSession(piSessionId: string): Promise<unknown> {
+		return this.call(
+			"heartbeat_bridge_work_session",
+			{ pi_session_id: piSessionId },
+			10_000,
+		);
+	}
+
+	endWorkSession(
+		piSessionId: string,
+		reason: "unlinked" | "shutdown",
+	): Promise<unknown> {
+		return this.call(
+			"end_bridge_work_session",
+			{ pi_session_id: piSessionId, reason },
+			5_000,
 		);
 	}
 
@@ -1024,6 +1092,16 @@ export class TakonautClient {
 					reported_status: instance.reportedStatus,
 					started_at: instance.startedAt,
 					last_activity_at: instance.lastActivityAt,
+					...definedMetrics({
+						current_activity: instance.currentActivity,
+						last_tool: instance.lastTool,
+						tool_calls: instance.toolCalls,
+						turns: instance.turns,
+						tokens_in: instance.tokensIn,
+						tokens_out: instance.tokensOut,
+						cost_usd: instance.costUsd,
+						last_error: instance.lastError,
+					}),
 				})),
 			},
 			timeoutMs,
