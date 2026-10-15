@@ -1,6 +1,6 @@
 # Tako Bridge
 
-**Current release: [v0.5.0](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.5.0).**
+**Current release: [v0.5.1](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.5.1).**
 
 Tako Bridge is Takonaut's open-source developer workflow extension for the [Pi agent harness](https://github.com/earendil-works/pi). It brings assigned Takonaut work, governed Project Context, repository verification, durable recovery, tests, human-reviewed completion evidence, and Tako Grill Work hierarchy planning into a local Pi session.
 
@@ -24,7 +24,7 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.5.0 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.5.1 -l
 ```
 
 To upgrade an existing project-local installation, run the pinned install command above, then restart Pi or run `/reload` in the existing Pi session. Version-pinned Git installs do not automatically advance to newer release tags.
@@ -37,7 +37,9 @@ To try the update and reporting flows after installing or upgrading, run in Pi:
 /tako-report
 ```
 
-**New in v0.5.0:** Tako Bridge now knows which Task you are working on. When a session starts it links to the Task of your active Run or the Task key in your branch name (for example `feat/cp-42-login`), or asks to continue your last Task in that repository. Use `/tako-link` to pick a Task, `/tako-link TASK-KEY`, or `/tako-link --none REASON` to work without one, and `/tako-unlink` to stop. Linked time is reported so Takonaut can show active time, cycle time, and time per Stage on each Task; linking can move an unstarted Task to its in-progress Stage. Projects can remind you once per session or require a linked Task before the first prompt. Agent telemetry now also reports the current activity (file names only, redacted commands, never tool output), tool calls, turns, tokens, cost, and the last error. Requires a Takonaut server with Bridge work tracking.
+**New in v0.5.1:** `/tako-update` shows a live spinner with elapsed time while the update installs and verifies. Partially set `TAKONAUT_*` environment credentials no longer stop the extension from loading: Bridge warns, ignores them, and falls back to your saved `/tako-login` credentials.
+
+**v0.5.0:** Tako Bridge now knows which Task you are working on. When a session starts it links to the Task of your active Run or the Task key in your branch name (for example `feat/cp-42-login`), or asks to continue your last Task in that repository. Use `/tako-link` to pick a Task, `/tako-link TASK-KEY`, or `/tako-link --none REASON` to work without one, and `/tako-unlink` to stop. Linked time is reported so Takonaut can show active time, cycle time, and time per Stage on each Task; linking can move an unstarted Task to its in-progress Stage. Projects can remind you once per session or require a linked Task before the first prompt. Agent telemetry now also reports the current activity (file names only, redacted commands, never tool output), tool calls, turns, tokens, cost, and the last error. Requires a Takonaut server with Bridge work tracking.
 
 **v0.4.26:** `/tako-update` can now install a newer release for you: it shows the exact `pi install` command, runs it only after you confirm, verifies the result with `pi list`, and offers to reload Pi. When your device key expires or is revoked, the panel now asks you to sign in with `/tako-login` instead of retrying forever. Also new: session handoff (`/tako-handoff`, `/tako-resume`) and shared Project context tools with a per-session budget.
 

@@ -153,6 +153,8 @@ vi.mock("../src/config", () => ({
 	saveConfig: mocks.saveConfig,
 	clearActiveCredential: mocks.clearActiveCredential,
 	loadPanelSettings: () => mocks.panelSettings,
+	hasPartialEnvironmentCredentials: () => false,
+	PARTIAL_ENV_CREDENTIALS_WARNING: "partial env",
 	savePanelSettings: mocks.savePanelSettings,
 	projectRepoMappingKey: (orgId: string, projectId: string) =>
 		`${orgId}:${projectId}`,

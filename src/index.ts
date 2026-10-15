@@ -45,6 +45,8 @@ import { BridgeUpdates } from "./updates.js";
 import { BridgeUpdateCommand, bridgeInstallScope } from "./update-command.js";
 import {
 	clearActiveCredential,
+	hasPartialEnvironmentCredentials,
+	PARTIAL_ENV_CREDENTIALS_WARNING,
 	loadConfig,
 	loadPanelSettings,
 	projectRepoMappingKey,
@@ -3753,9 +3755,17 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		try {
 			c = cfg ?? (cfg = loadConfig());
 		} catch (error) {
+			// Never crash Pi startup on bad config; show the login panel instead.
 			reporter.diagnostics.record("connection", error);
-			throw error;
+			if (ctx.hasUI)
+				ctx.ui.notify?.(
+					`Tako Bridge: ${error instanceof Error ? error.message : String(error)}`,
+					"warning",
+				);
+			c = null;
 		}
+		if (hasPartialEnvironmentCredentials() && ctx.hasUI)
+			ctx.ui.notify?.(PARTIAL_ENV_CREDENTIALS_WARNING, "warning");
 		if (!c) {
 			if (ctx.mode === "tui" && ctx.ui?.setWidget) {
 				if (loadPanelSettings().visible) {

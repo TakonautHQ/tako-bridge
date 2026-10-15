@@ -454,3 +454,25 @@ describe("secure Bridge profiles", () => {
 		expect(statSync(`${credentialsPath}.v1-backup`).mode & 0o777).toBe(0o600);
 	});
 });
+
+describe("partial environment credentials", () => {
+	const keys = ["TAKONAUT_MCP_URL", "TAKONAUT_API_KEY", "TAKONAUT_ORG_ID"];
+	let saved: Record<string, string | undefined>;
+	beforeEach(() => {
+		saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+		for (const k of keys) delete process.env[k];
+	});
+	afterEach(() => {
+		for (const k of keys)
+			if (saved[k] === undefined) delete process.env[k];
+			else process.env[k] = saved[k];
+	});
+
+	it("ignores partial env instead of throwing", () => {
+		process.env.TAKONAUT_API_KEY = "key-only";
+		const dir = mkdtempSync(join(tmpdir(), "tako-partial-"));
+		expect(bridgeConfig.hasPartialEnvironmentCredentials()).toBe(true);
+		expect(() => loadConfigFromFiles(join(dir, "bridge.json"))).not.toThrow();
+		expect(loadConfigFromFiles(join(dir, "bridge.json"))).toBeNull();
+	});
+});

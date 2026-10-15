@@ -472,6 +472,20 @@ export function readProjectRepoMapping(
 	return bridge.projectRepos?.[projectRepoMappingKey(orgId, projectId)] ?? null;
 }
 
+export const PARTIAL_ENV_CREDENTIALS_WARNING =
+	"Partial Takonaut environment credentials ignored. Set TAKONAUT_MCP_URL, " +
+	"TAKONAUT_API_KEY, and TAKONAUT_ORG_ID together, or unset them and use /tako-login.";
+
+/** True when some, but not all, TAKONAUT_* credential variables are set. */
+export function hasPartialEnvironmentCredentials(): boolean {
+	const supplied = [
+		process.env.TAKONAUT_MCP_URL,
+		process.env.TAKONAUT_API_KEY,
+		process.env.TAKONAUT_ORG_ID,
+	].filter(Boolean).length;
+	return supplied > 0 && supplied < 3;
+}
+
 function environmentCredential(): CredentialProfile | null {
 	const values = [
 		process.env.TAKONAUT_MCP_URL,
@@ -479,13 +493,8 @@ function environmentCredential(): CredentialProfile | null {
 		process.env.TAKONAUT_ORG_ID,
 	];
 	const supplied = values.filter(Boolean).length;
-	if (supplied > 0 && supplied < values.length) {
-		throw new Error(
-			"Partial Takonaut environment credentials. Set TAKONAUT_MCP_URL, " +
-				"TAKONAUT_API_KEY, and TAKONAUT_ORG_ID together.",
-		);
-	}
-	if (supplied === 0) return null;
+	// Partial env is ignored (caller surfaces a warning); fall back to saved credentials.
+	if (supplied < values.length) return null;
 	bridgeServerUrl(values[0]!, "Takonaut MCP URL");
 	return {
 		serverUrl: values[0]!,
@@ -501,7 +510,9 @@ export function loadConfigFromFiles(
 	const { bridge, credentials } = readFiles(configPath, credentialPath);
 	const env = environmentCredential();
 	const orgId =
-		env?.orgId ?? process.env.TAKONAUT_ORG_ID ?? credentials?.activeOrgId;
+		env?.orgId ??
+		(hasPartialEnvironmentCredentials() ? undefined : process.env.TAKONAUT_ORG_ID) ??
+		credentials?.activeOrgId;
 	const profile = env ?? (orgId ? credentials?.profiles?.[orgId] : undefined);
 	if (!profile) return null;
 	if (typeof profile.orgId !== "string" || !profile.orgId.trim()) {

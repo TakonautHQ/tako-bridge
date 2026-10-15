@@ -15,7 +15,10 @@ const INSTALL_TIMEOUT_MS = 180_000;
 
 interface UpdateContext {
 	hasUI: boolean;
-	ui: ReportUI;
+	ui: ReportUI & {
+		setWidget?(key: string, content: string[] | undefined): void;
+		setStatus?(key: string, text: string | undefined): void;
+	};
 	reload?: () => Promise<void>;
 }
 
@@ -51,6 +54,44 @@ export function bridgeInstallScope(
 	}
 }
 
+const PROGRESS_KEY = "tako-update";
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/**
+ * Shows an animated spinner with elapsed time while the install runs.
+ * Returns a function that either swaps in a final phase message or clears it.
+ */
+function showProgress(
+	ctx: UpdateContext,
+	tag: string,
+): (phase?: string) => void {
+	const { setWidget, setStatus } = ctx.ui;
+	if (!setWidget && !setStatus) return () => {};
+	const started = Date.now();
+	let frame = 0;
+	let phase = `Installing Tako Bridge ${tag} via pi install`;
+	const render = () => {
+		const secs = Math.floor((Date.now() - started) / 1000);
+		const line = `${SPINNER[frame++ % SPINNER.length]} ${phase}… ${secs}s (up to ${INSTALL_TIMEOUT_MS / 1000}s)`;
+		setWidget?.call(ctx.ui, PROGRESS_KEY, [line]);
+		setStatus?.call(ctx.ui, PROGRESS_KEY, `${SPINNER[frame % SPINNER.length]} updating ${secs}s`);
+	};
+	render();
+	let timer: ReturnType<typeof setInterval> | undefined = setInterval(render, 120);
+	timer.unref?.();
+	return (next) => {
+		if (next && timer) {
+			phase = next;
+			render();
+			return;
+		}
+		if (timer) clearInterval(timer);
+		timer = undefined;
+		setWidget?.call(ctx.ui, PROGRESS_KEY, undefined);
+		setStatus?.call(ctx.ui, PROGRESS_KEY, undefined);
+	};
+}
+
 /** Installs an official release only after the user confirms the exact pi install command. */
 export class BridgeUpdateCommand {
 	private busy = false;
@@ -70,11 +111,18 @@ export class BridgeUpdateCommand {
 		const ui = ctx.ui;
 		const cwd = this.cwd();
 		ui.notify?.(`Installing Tako Bridge ${release.tag}…`, "info");
-		const result = await this.run_("pi", bridgeUpgradeArgs(release, scope), {
-			cwd,
-			timeout: INSTALL_TIMEOUT_MS,
-		});
+		const stopProgress = showProgress(ctx, release.tag);
+		let result: Awaited<ReturnType<CommandRunner>>;
+		try {
+			result = await this.run_("pi", bridgeUpgradeArgs(release, scope), {
+				cwd,
+				timeout: INSTALL_TIMEOUT_MS,
+			});
+		} finally {
+			stopProgress("Verifying install…");
+		}
 		if (result.exitCode !== 0 || result.timedOut) {
+			stopProgress();
 			const detail = (result.stderr || result.stdout).trim().slice(-600);
 			ui.notify?.(
 				`Update ${result.timedOut ? "timed out" : "failed"}. Your current version is unchanged.\n${detail}\n\nManual command: ${bridgeUpgradeCommand(release, scope)}`,
@@ -82,7 +130,12 @@ export class BridgeUpdateCommand {
 			);
 			return;
 		}
-		const listed = await this.run_("pi", ["list"], { cwd, timeout: 30_000 });
+		let listed: Awaited<ReturnType<CommandRunner>>;
+		try {
+			listed = await this.run_("pi", ["list"], { cwd, timeout: 30_000 });
+		} finally {
+			stopProgress();
+		}
 		const pinned = `TakonautHQ/tako-bridge@${release.tag}`;
 		if (listed.exitCode !== 0 || !listed.stdout.includes(pinned)) {
 			ui.notify?.(
