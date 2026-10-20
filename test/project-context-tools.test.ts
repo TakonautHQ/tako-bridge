@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { CompanionTool } from "../src/catalog";
 import { ContextBudget } from "../src/project-context-budget";
-import { projectContextCompanions } from "../src/project-context-tools";
+import {
+	findingIdempotencyKey,
+	projectContextCompanions,
+} from "../src/project-context-tools";
 
 const REPOSITORY = {
 	repository_id: "repo-1",
@@ -12,6 +15,10 @@ const REPOSITORY = {
 	status: "ready",
 	commit: null,
 };
+
+const DOC_REF =
+	"doc:7d1f0c6e-1111-4c4c-9a9a-000000000001@7d1f0c6e-2222-4c4c-9a9a-000000000002";
+const RUN = { runId: "run-1", sessionId: "session-1" };
 
 function item(ref: string, extra: Record<string, unknown> = {}) {
 	return {
@@ -28,11 +35,30 @@ function setup(
 	budget = new ContextBudget(4096),
 	activeRun: { runId: string; sessionId: string } | null = null,
 	pinFails = false,
+	findingFails = "",
 ) {
 	const callTool = vi.fn(
 		async (name: string, args: Record<string, unknown>) => {
 			if (name === "list_project_context_repositories")
 				return { repositories: [REPOSITORY], truncated: false };
+			if (name === "record_project_finding") {
+				if (findingFails) throw new Error(`project_context:${findingFails}`);
+				return { finding_id: "finding-1", revision: 1, state: "current" };
+			}
+			if (name === "discover_project_context" && args.source === "records")
+				return {
+					status: "ready",
+					source: "records",
+					candidates: [{ ref: DOC_REF, type: "document", title: "Billing" }],
+					omitted: [],
+				};
+			if (name === "expand_project_evidence" && args.source === "records")
+				return {
+					status: "ready",
+					source: "records",
+					items: [{ ref: DOC_REF, type: "document", text: "Prices round." }],
+					omitted: [],
+				};
 			if (name === "discover_project_context")
 				return {
 					status: "ready",
@@ -197,5 +223,151 @@ describe("run pins", () => {
 		});
 		expect(result.status).toBe("ready");
 		expect(result.run_pin).toBe("failed");
+	});
+});
+
+describe("records", () => {
+	it("discovers published documents and Tasks without a checkout", async () => {
+		const { call, callTool, budget } = setup();
+		const result = await call("tako_context_discover", {
+			query: "billing",
+			source: "records",
+		});
+		expect(result.candidates[0].ref).toBe(DOC_REF);
+		expect(callTool).toHaveBeenCalledTimes(1);
+		expect(callTool).toHaveBeenCalledWith(
+			"discover_project_context",
+			{ project_key: "PAY", query: "billing", source: "records" },
+			undefined,
+		);
+		expect(budget.used).toBeGreaterThan(0);
+	});
+
+	it("expands record refs without a context view", async () => {
+		const { call, callTool } = setup();
+		const result = await call("tako_context_expand", {
+			refs: [`${DOC_REF}~4000`],
+			source: "records",
+		});
+		expect(result.items[0].text).toBe("Prices round.");
+		expect(callTool).toHaveBeenCalledWith(
+			"expand_project_evidence",
+			{ project_key: "PAY", refs: [`${DOC_REF}~4000`], source: "records" },
+			undefined,
+		);
+	});
+
+	it("serves shared findings the same way", async () => {
+		const { call, callTool } = setup();
+		await call("tako_context_discover", {
+			query: "refunds",
+			source: "findings",
+		});
+		await call("tako_context_expand", {
+			refs: ["finding:7d1f0c6e-1111-4c4c-9a9a-000000000001@2"],
+			source: "findings",
+		});
+		expect(callTool.mock.calls.map((c) => [c[0], c[1].source])).toEqual([
+			["discover_project_context", "findings"],
+			["expand_project_evidence", "findings"],
+		]);
+	});
+
+	it("needs a context view to expand code refs", async () => {
+		const { call, callTool } = setup();
+		expect(await call("tako_context_expand", { refs: ["s:1"] })).toEqual({
+			error: "context_view_required",
+		});
+		expect(callTool).not.toHaveBeenCalled();
+	});
+});
+
+describe("findings", () => {
+	it("records a finding for the session's active run", async () => {
+		const { call, callTool } = setup(undefined, RUN);
+		const result = await call("tako_context_record_finding", {
+			claim: "Refunds settle nightly.",
+			evidence: ["s:15", DOC_REF],
+			context_view_id: "view-1",
+		});
+		expect(result).toEqual({
+			finding_id: "finding-1",
+			revision: 1,
+			state: "current",
+		});
+		expect(callTool).toHaveBeenCalledWith(
+			"record_project_finding",
+			{
+				run_id: "run-1",
+				session_id: "session-1",
+				claim: "Refunds settle nightly.",
+				evidence: ["s:15", DOC_REF],
+				idempotency_key: findingIdempotencyKey("session-1", "call"),
+				context_view_id: "view-1",
+			},
+			undefined,
+		);
+	});
+
+	it("keys any provider's tool-call ID in the server's format", () => {
+		const responses = `call_${"a".repeat(40)}|fc_${"b".repeat(48)}`;
+		const key = findingIdempotencyKey("session-1", responses);
+		expect(key).toMatch(/^[A-Za-z0-9._:-]{1,80}$/);
+		expect(findingIdempotencyKey("session-1", responses)).toBe(key);
+		expect(findingIdempotencyKey("session-2", responses)).not.toBe(key);
+		expect(findingIdempotencyKey("session-1", "toolu_01")).not.toBe(key);
+	});
+
+	it("revises a finding at its expected revision", async () => {
+		const { call, callTool } = setup(undefined, RUN);
+		await call("tako_context_record_finding", {
+			claim: "Refunds settle hourly.",
+			evidence: [DOC_REF],
+			finding_id: "finding-1",
+			expected_revision: 1,
+		});
+		expect(callTool.mock.calls[0][1]).toMatchObject({
+			finding_id: "finding-1",
+			expected_revision: 1,
+		});
+	});
+
+	it("needs an active delivery run", async () => {
+		const { call, callTool } = setup();
+		expect(
+			await call("tako_context_record_finding", {
+				claim: "x",
+				evidence: [DOC_REF],
+			}),
+		).toEqual({ error: "no_active_run" });
+		expect(callTool).not.toHaveBeenCalled();
+	});
+
+	it("reports server refusals as codes", async () => {
+		const { call } = setup(undefined, RUN, false, "evidence_superseded");
+		expect(
+			await call("tako_context_record_finding", {
+				claim: "x",
+				evidence: [DOC_REF],
+			}),
+		).toEqual({ error: "evidence_superseded" });
+	});
+});
+
+describe("activation", () => {
+	it("offers finding recording wherever shared discovery is offered", () => {
+		// record_project_finding is a never-listed Bridge protocol tool.
+		const tools = projectContextCompanions({
+			connection: () => null,
+			run: async () => ({ stdout: "", stderr: "", exitCode: 1 }),
+			candidates: () => [],
+			defaultProjectKey: () => null,
+			budget: () => new ContextBudget(4096),
+			activeRun: () => null,
+		});
+		const finding = tools.find(
+			(tool) => tool.definition.name === "tako_context_record_finding",
+		);
+		expect(finding?.requires).toEqual(["discover_project_context"]);
 	});
 });

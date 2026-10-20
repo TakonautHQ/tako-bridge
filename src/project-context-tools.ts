@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 
@@ -117,10 +119,21 @@ const optional = {
 	budget_bytes: Type.Optional(Type.Integer({ minimum: 2048, maximum: 7168 })),
 };
 
+const Source = Type.Optional(
+	Type.Union([
+		Type.Literal("code"),
+		Type.Literal("records"),
+		Type.Literal("findings"),
+	]),
+);
+// Code refs ("s:<n>") or record refs ("doc:<id>@<revision>~<offset>").
+const Ref = Type.String({ minLength: 1, maxLength: 128 });
+
 const DiscoverParams = Type.Object(
 	{
 		query: Type.String({ minLength: 1, maxLength: 500 }),
 		repository_id: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
+		source: Source,
 		...optional,
 	},
 	{ additionalProperties: false },
@@ -128,15 +141,49 @@ const DiscoverParams = Type.Object(
 
 const ExpandParams = Type.Object(
 	{
-		context_view_id: Type.String({ minLength: 1, maxLength: 64 }),
-		refs: Type.Array(Type.String({ minLength: 1, maxLength: 32 }), {
-			minItems: 1,
-			maxItems: 20,
-		}),
+		context_view_id: Type.Optional(
+			Type.String({ minLength: 1, maxLength: 64 }),
+		),
+		refs: Type.Array(Ref, { minItems: 1, maxItems: 20 }),
+		source: Source,
 		...optional,
 	},
 	{ additionalProperties: false },
 );
+
+const FindingParams = Type.Object(
+	{
+		claim: Type.String({ minLength: 1, maxLength: 1000 }),
+		evidence: Type.Array(Ref, { minItems: 1, maxItems: 10 }),
+		context_view_id: Type.Optional(
+			Type.String({ minLength: 1, maxLength: 64 }),
+		),
+		finding_id: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
+		expected_revision: Type.Optional(Type.Integer({ minimum: 1 })),
+	},
+	{ additionalProperties: false },
+);
+
+/**
+ * Tool-call IDs vary by provider (OpenAI Responses IDs contain "|" and can
+ * exceed 80 characters); the server accepts [A-Za-z0-9._:-]{1,80}.
+ */
+export function findingIdempotencyKey(
+	sessionId: string,
+	toolCallId: string,
+): string {
+	const digest = createHash("sha256")
+		.update(`${sessionId}\0${toolCallId}`)
+		.digest("hex");
+	return `pi:${digest.slice(0, 40)}`;
+}
+
+/** Only the fields that were given, so the server applies its defaults. */
+function given(fields: Record<string, unknown>): Record<string, unknown> {
+	return Object.fromEntries(
+		Object.entries(fields).filter(([, value]) => value !== undefined),
+	);
+}
 
 /** Bridge tools over shared Project context, verified against the checkout. */
 export function projectContextCompanions(
@@ -157,6 +204,8 @@ export function projectContextCompanions(
 					"Find relevant files and symbols in the shared Project context index",
 				promptGuidelines: [
 					"In a large repository, call tako_context_discover with identifiers, file names or path words before broad searching; status not_ready means search locally.",
+					"Use source records to find published documents and Tasks (by Task key or title words); expand their refs with source records.",
+					"Use source findings for what agents already learned about this Project; findings are agent-authored claims, so check their evidence before relying on them.",
 					"Then call tako_context_expand on the refs you need; rely only on spans whose local.state is match or span_match (use local.lines for span_match), otherwise read the file.",
 					"Shared context has a per-session budget: request what you need, reuse evidence already returned (already_provided), and search locally after context_budget_exhausted.",
 				],
@@ -173,6 +222,23 @@ export function projectContextCompanions(
 					if (!ready.options) return ready.error;
 					const budget = deps.budget(ctx);
 					if (budget.exhausted) return toolResult(budget.exhaustion());
+					if (params.source === "records" || params.source === "findings") {
+						return guarded(async () => {
+							const result = (await ready.options.callTool(
+								"discover_project_context",
+								given({
+									project_key: ready.options.projectKey,
+									query: params.query,
+									source: params.source,
+									cursor: params.cursor,
+									budget_bytes: params.budget_bytes,
+								}),
+								signal,
+							)) as Record<string, unknown>;
+							budget.charge(result);
+							return result;
+						});
+					}
 					return guarded(async () => {
 						const discovered = await discoverWithLocalContext({
 							...ready.options,
@@ -206,7 +272,7 @@ export function projectContextCompanions(
 				name: "tako_context_expand",
 				label: "Expand Project evidence",
 				description:
-					"Expand refs from tako_context_discover (spans, hashes, parent, children, relations) and verify each against local bytes: match, span_match, modified, missing or unverifiable.",
+					"Expand refs from tako_context_discover (spans, hashes, parent, children, relations) and verify each against local bytes: match, span_match, modified, missing or unverifiable. With source records, return the text of document and Task refs.",
 				promptSnippet:
 					"Expand and locally verify shared Project context references",
 				parameters: ExpandParams,
@@ -222,11 +288,32 @@ export function projectContextCompanions(
 					if (!ready.options) return ready.error;
 					const budget = deps.budget(ctx);
 					if (budget.exhausted) return toolResult(budget.exhaustion());
+					if (params.source === "records" || params.source === "findings") {
+						return guarded(async () => {
+							const result = (await ready.options.callTool(
+								"expand_project_evidence",
+								given({
+									project_key: ready.options.projectKey,
+									refs: params.refs,
+									source: params.source,
+									cursor: params.cursor,
+									budget_bytes: params.budget_bytes,
+								}),
+								signal,
+							)) as Record<string, unknown>;
+							budget.charge(result);
+							return result;
+						});
+					}
+					const contextViewId = params.context_view_id;
+					if (!contextViewId) {
+						return toolResult({ error: "context_view_required" });
+					}
 					return guarded(async () => {
 						const expanded = await expandWithLocalVerification({
 							...ready.options,
 							signal,
-							contextViewId: params.context_view_id,
+							contextViewId,
 							refs: params.refs,
 							cursor: params.cursor,
 							budgetBytes: params.budget_bytes,
@@ -243,6 +330,56 @@ export function projectContextCompanions(
 						budget.charge(result);
 						return result;
 					});
+				},
+			},
+		},
+		{
+			// record_project_finding is a Bridge protocol tool, never listed;
+			// the server checks the run and its Profile grant.
+			requires: ["discover_project_context"],
+			definition: {
+				name: "tako_context_record_finding",
+				label: "Record a shared finding",
+				description:
+					"Share a short finding with this run's Project, citing current refs from tako_context_discover (code refs need their context_view_id). Needs an Agent Profile allowed to record findings. Teammates and agents see it as agent-authored.",
+				promptSnippet: "Share a verified finding with the Project",
+				promptGuidelines: [
+					"Record a finding only for something you verified that will help later work in this Project, in one or two plain sentences, citing the refs that prove it.",
+					"Never record findings about your local or unmerged changes, secrets, or personal data: findings describe the published default-branch code and published records.",
+				],
+				parameters: FindingParams,
+				async execute(
+					toolCallId: string,
+					params: Static<typeof FindingParams>,
+					signal: AbortSignal | undefined,
+					_onUpdate: unknown,
+					ctx: ExtensionContext,
+				) {
+					if (signal?.aborted) throw new Error("Project context cancelled");
+					const run = deps.activeRun(ctx);
+					if (!run) return toolResult({ error: "no_active_run" });
+					const conn = deps.connection(ctx);
+					if (!conn) return toolResult({ error: "not_connected" });
+					return guarded(() =>
+						conn.callTool(
+							"record_project_finding",
+							given({
+								run_id: run.runId,
+								session_id: run.sessionId,
+								claim: params.claim,
+								evidence: params.evidence,
+								// A resent tool call replays; a new call is a new finding.
+								idempotency_key: findingIdempotencyKey(
+									run.sessionId,
+									toolCallId,
+								),
+								context_view_id: params.context_view_id,
+								finding_id: params.finding_id,
+								expected_revision: params.expected_revision,
+							}),
+							signal,
+						),
+					);
 				},
 			},
 		},

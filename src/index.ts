@@ -37,6 +37,7 @@ import { TakonautToolCatalog } from "./catalog";
 import { ContextBudget } from "./project-context-budget";
 import { containsSensitiveValue, redactSensitiveValues } from "./redaction";
 import { projectContextCompanions } from "./project-context-tools";
+import { TaskFindingsNotes, projectKeyOf } from "./task-findings";
 import { registerHandoffCommands } from "./task-handoff-commands";
 import { collectLocalContext, formatLocalContextForInjection } from "./context";
 import { readAndPrepareDiagnostic } from "./diagnostics";
@@ -394,6 +395,33 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		}
 		return budget;
 	}
+
+	// Shared findings for the session's Task, added before the first prompt
+	// (and again after compaction). Silent when not connected or not offered.
+	const taskFindings = new TaskFindingsNotes({
+		connection: () =>
+			!connectionSuppressed &&
+			client &&
+			toolCatalog.offers("discover_project_context")
+				? client
+				: null,
+		focus: (ctx) => {
+			const run = activeRunFor(ctx);
+			if (run) return { taskKey: run.taskKey, projectKey: run.projectKey };
+			const link = workLink.snapshot();
+			const projectKey = link?.taskKey ? projectKeyOf(link.taskKey) : null;
+			return link?.taskKey && projectKey
+				? { taskKey: link.taskKey, projectKey }
+				: null;
+		},
+		budget: (ctx) => contextBudgetFor(ctx),
+		sessionKey: (ctx) => piSessionId(ctx),
+	});
+	pi.on("session_compact", (_event, ctx) => taskFindings.reset(ctx));
+	pi.on("before_agent_start", async (_event, ctx) => {
+		const message = await taskFindings.noteFor(ctx, AbortSignal.timeout(5000));
+		return message ? { message } : undefined;
+	});
 
 	function activeRunFor(ctx: ExtensionContext) {
 		const c = cfg ?? loadConfig();

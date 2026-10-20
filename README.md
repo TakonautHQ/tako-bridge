@@ -1,6 +1,6 @@
 # Tako Bridge
 
-**Current release: [v0.5.1](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.5.1).**
+**Current release: [v0.5.2](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.5.2).**
 
 Tako Bridge is Takonaut's open-source developer workflow extension for the [Pi agent harness](https://github.com/earendil-works/pi). It brings assigned Takonaut work, governed Project Context, repository verification, durable recovery, tests, human-reviewed completion evidence, and Tako Grill Work hierarchy planning into a local Pi session.
 
@@ -24,7 +24,7 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.5.1 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.5.2 -l
 ```
 
 To upgrade an existing project-local installation, run the pinned install command above, then restart Pi or run `/reload` in the existing Pi session. Version-pinned Git installs do not automatically advance to newer release tags.
@@ -37,7 +37,9 @@ To try the update and reporting flows after installing or upgrading, run in Pi:
 /tako-report
 ```
 
-**New in v0.5.1:** `/tako-update` shows a live spinner with elapsed time while the update installs and verifies. Partially set `TAKONAUT_*` environment credentials no longer stop the extension from loading: Bridge warns, ignores them, and falls back to your saved `/tako-login` credentials.
+**New in v0.5.2:** shared Project knowledge. `tako_context_discover` and `tako_context_expand` also search published documents and Tasks (`source: "records"`) and the findings agents shared in the Project (`source: "findings"`). During a delivery run whose Agent Profile may record shared findings, `tako_context_record_finding` shares a short, verified finding with the Project, citing current evidence. Before the first prompt, Bridge adds the current findings about the session's Task (at most 3 KiB, as untrusted reference material). Requires a Takonaut server with shared findings.
+
+**v0.5.1:** `/tako-update` shows a live spinner with elapsed time while the update installs and verifies. Partially set `TAKONAUT_*` environment credentials no longer stop the extension from loading: Bridge warns, ignores them, and falls back to your saved `/tako-login` credentials.
 
 **v0.5.0:** Tako Bridge now knows which Task you are working on. When a session starts it links to the Task of your active Run or the Task key in your branch name (for example `feat/cp-42-login`), or asks to continue your last Task in that repository. Use `/tako-link` to pick a Task, `/tako-link TASK-KEY`, or `/tako-link --none REASON` to work without one, and `/tako-unlink` to stop. Linked time is reported so Takonaut can show active time, cycle time, and time per Stage on each Task; linking can move an unstarted Task to its in-progress Stage. Projects can remind you once per session or require a linked Task before the first prompt. Agent telemetry now also reports the current activity (file names only, redacted commands, never tool output), tool calls, turns, tokens, cost, and the last error. Requires a Takonaut server with Bridge work tracking.
 
@@ -173,10 +175,14 @@ Creating a Task through the governed `tako_action` path still requires `tasks.cr
 
 ### Shared Project context
 
-When an administrator has enabled shared Project context for a repository (a customer Runner indexes its default branch; see Takonaut's Project settings), Bridge activates two local tools alongside the catalog:
+When an administrator has enabled shared Project context for a repository (a customer Runner indexes its default branch; see Takonaut's Project settings), Bridge activates local tools alongside the catalog:
 
 - `tako_context_discover` finds files and symbols in the repository's shared structure index. It maps the working directory (or the active Task's or a mapped Project checkout) to the Project repository by its `origin` remote, sends only the local `HEAD` commit, and reports how the checkout relates to the indexed commit: `same_commit`, `local_ahead`, `local_behind`, `diverged`, or `indexed_commit_missing`, plus whether tracked files are modified. Results are ranked, not exhaustive; `not_ready` means search the checkout instead.
 - `tako_context_expand` expands returned references (spans, hashes, parent, children, relations) and verifies each against local bytes: `match` (file identical), `span_match` (file changed, the definition's bytes identical at the same offsets; `local.lines` gives its current lines), `modified`, `missing`, or `unverifiable` (unsafe path, symlink, special or too large file). Rely only on `match` and `span_match` spans; read the file otherwise.
+- With `source: "records"` both tools search and read the Project's published documents and Tasks, and with `source: "findings"` the findings agents shared in the Project (only current ones whose evidence you may read), without a checkout. Findings are agent-authored claims: check their evidence before relying on them.
+- `tako_context_record_finding` shares a finding from the session's active delivery run when its Agent Profile grants "Record shared findings": one or two sentences (at most 1000 characters, secrets redacted) citing 1 to 10 current refs from discovery. Members see it at once as agent-authored and can correct or retire it on the Project's Knowledge page; it becomes stale when its evidence changes.
+
+When the session works on a Task (an active Run or a linked Task), Bridge adds the current findings about that Task once before the first prompt and again after compaction: at most 3 KiB, charged to the budget below, framed as untrusted reference material.
 
 Each Pi session has a cumulative shared-context budget (1 MiB of results by default; `TAKONAUT_CONTEXT_BUDGET_BYTES`, 16 KiB to 4 MiB): evidence already returned in the session comes back as `already_provided` with fresh local verification, and once the budget is spent the tools return `context_budget_exhausted` so the agent searches locally. Compaction makes earlier evidence available in full again; the budget resets when Pi reloads the extension. Pass `project_key` unless a Task is running. Hashes cover Git blob bytes, so line-ending conversion in the working tree reads as `modified`. Verification reads files only inside the checkout, never follows symlinks, and re-checks the opened file. Repositories are matched by owner and name, so Projects with many repositories work too.
 
