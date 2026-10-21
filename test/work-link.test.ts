@@ -125,6 +125,20 @@ describe("WorkLinkController", () => {
 		expect(await link.end(a, "s", "unlinked")).toBe(false);
 	});
 
+	it("hands each heartbeat's response on, with its session", async () => {
+		vi.useFakeTimers();
+		const a = {
+			...api(),
+			heartbeatWorkSession: vi.fn(async () => ({ linked: true, watch_requests: [{ id: "r-1" }] })),
+		};
+		const onHeartbeat = vi.fn();
+		const link = new WorkLinkController({ intervalMs: 1_000, onHeartbeat });
+		await link.link(a, { piSessionId: "s", taskKey: "CP-1", linkSource: "command" });
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(onHeartbeat).toHaveBeenCalledWith({ linked: true, watch_requests: [{ id: "r-1" }] }, "s");
+		await link.end(a, "s", "unlinked");
+	});
+
 	it("nudges once, and never when linked", async () => {
 		const link = new WorkLinkController();
 		expect(link.shouldNudge()).toBe(true);

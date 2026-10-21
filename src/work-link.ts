@@ -160,6 +160,8 @@ export class WorkLinkController {
 		private readonly options: {
 			intervalMs?: number;
 			onHeartbeatError?: (error: unknown) => void;
+			/** Each heartbeat's response (it carries requests to watch live). */
+			onHeartbeat?: (result: unknown, piSessionId: string) => void;
 		} = {},
 	) {}
 
@@ -210,9 +212,10 @@ export class WorkLinkController {
 	private startHeartbeat(api: WorkLinkApi, piSessionId: string): void {
 		this.stopHeartbeat();
 		this.timer = setInterval(() => {
-			api.heartbeatWorkSession(piSessionId).catch((error) =>
-				this.options.onHeartbeatError?.(error),
-			);
+			api
+				.heartbeatWorkSession(piSessionId)
+				.then((result) => this.options.onHeartbeat?.(result, piSessionId))
+				.catch((error) => this.options.onHeartbeatError?.(error));
 		}, this.options.intervalMs ?? WORK_LINK_HEARTBEAT_MS);
 		(this.timer as { unref?: () => void }).unref?.();
 	}

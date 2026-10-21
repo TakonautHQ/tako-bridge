@@ -1,6 +1,8 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
+import { PROVIDER_TOKEN_PATTERNS } from "./redaction";
+
 const MAX_DIAGNOSTIC_BYTES = 128 * 1024;
 const PRIVATE_KEY_RE = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i;
 const REDACTIONS: Array<{ pattern: RegExp; replacement: string }> = [
@@ -9,12 +11,10 @@ const REDACTIONS: Array<{ pattern: RegExp; replacement: string }> = [
 		pattern: /\b(?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*\S+/gi,
 		replacement: "[REDACTED]",
 	},
-	{ pattern: /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, replacement: "[REDACTED]" },
-	{
-		pattern:
-			/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[opsu]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g,
+	...PROVIDER_TOKEN_PATTERNS.map((pattern) => ({
+		pattern,
 		replacement: "[REDACTED]",
-	},
+	})),
 	{
 		pattern: /(^|\s)\/(?:Users|home)\/[^\s:]+/g,
 		replacement: "$1[LOCAL_PATH]",

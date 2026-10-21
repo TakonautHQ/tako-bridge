@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
+import { PROVIDER_TOKEN_PATTERNS } from "./redaction.js";
 import { BRIDGE_VERSION } from "./version.js";
 
 const SOURCES = [
@@ -126,6 +127,11 @@ export function sanitizeReportText(value: string): string {
 		.replace(
 			/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,
 			"[REDACTED JWT]",
+		)
+		.replace(
+			// Tokens glued to other text, which the \b-bounded pattern above misses.
+			new RegExp(PROVIDER_TOKEN_PATTERNS.map((p) => p.source).join("|"), "g"),
+			"[REDACTED TOKEN]",
 		)
 		.replace(
 			/\b(?:https?|wss?|postgres(?:ql)?|mysql|redis|mongodb(?:\+srv)?):\/\/[^\s<>"']+/gi,

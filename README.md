@@ -1,6 +1,6 @@
 # Tako Bridge
 
-**Current release: [v0.5.2](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.5.2).**
+**Current release: [v0.6.0](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.6.0).**
 
 Tako Bridge is Takonaut's open-source developer workflow extension for the [Pi agent harness](https://github.com/earendil-works/pi). It brings assigned Takonaut work, governed Project Context, repository verification, durable recovery, tests, human-reviewed completion evidence, and Tako Grill Work hierarchy planning into a local Pi session.
 
@@ -24,7 +24,7 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.5.2 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.6.0 -l
 ```
 
 To upgrade an existing project-local installation, run the pinned install command above, then restart Pi or run `/reload` in the existing Pi session. Version-pinned Git installs do not automatically advance to newer release tags.
@@ -37,7 +37,9 @@ To try the update and reporting flows after installing or upgrading, run in Pi:
 /tako-report
 ```
 
-**New in v0.5.2:** shared Project knowledge. `tako_context_discover` and `tako_context_expand` also search published documents and Tasks (`source: "records"`) and the findings agents shared in the Project (`source: "findings"`). During a delivery run whose Agent Profile may record shared findings, `tako_context_record_finding` shares a short, verified finding with the Project, citing current evidence. Before the first prompt, Bridge adds the current findings about the session's Task (at most 3 KiB, as untrusted reference material). Requires a Takonaut server with shared findings.
+**New in v0.6.0:** live watch. `/tako-watch` broadcasts the current session live, read-only, to everyone in the Project or people you name, after showing exactly what is shared: your prompts, the agent's replies and thinking, and one line per tool call (never tool output, file contents or command output). Teammates can also ask to watch from Takonaut's Bridge or Task page; Bridge asks you when the agent pauses. Secrets are redacted, nothing is kept after the broadcast ends, and watchers cannot send anything to your session. Provider tokens are now redacted even when glued to other text. Requires a Takonaut server with live watch, and a Project administrator must turn on **Allow live watch**.
+
+**v0.5.2:** shared Project knowledge. `tako_context_discover` and `tako_context_expand` also search published documents and Tasks (`source: "records"`) and the findings agents shared in the Project (`source: "findings"`). During a delivery run whose Agent Profile may record shared findings, `tako_context_record_finding` shares a short, verified finding with the Project, citing current evidence. Before the first prompt, Bridge adds the current findings about the session's Task (at most 3 KiB, as untrusted reference material). Requires a Takonaut server with shared findings.
 
 **v0.5.1:** `/tako-update` shows a live spinner with elapsed time while the update installs and verifies. Partially set `TAKONAUT_*` environment credentials no longer stop the extension from loading: Bridge warns, ignores them, and falls back to your saved `/tako-login` credentials.
 
@@ -191,6 +193,18 @@ Each Pi session has a cumulative shared-context budget (1 MiB of results by defa
 `/tako-handoff PAY-12` shares where you got to on a Task. Bridge asks your agent to draft a summary (work done and learned, decisions, plan, open questions, files touched), adds the repository state (remote, branch, commit, local changes), redacts secrets and opens the pack for you to review and edit. You choose who may see it (everyone in the Project, or named Project members) and confirm before anything is uploaded. Your session itself is never uploaded. `/tako-handoff withdraw HANDOFF_ID` withdraws one and erases its content.
 
 `/tako-resume PAY-12` starts a new Pi session seeded with a handoff you may see, on your own model. If your checkout differs from the author's (repository, branch, commit, or their uncommitted changes), the session is told to re-read files rather than trust the summary. A handoff is evidence about past work, not instructions.
+
+### Live watch
+
+`/tako-watch` broadcasts the current session live, read-only, to teammates you choose. Bridge first shows exactly what is shared and asks who may watch (everyone in the Project, or named Project members). The Project is your linked Task's; without one, Bridge asks for a Project key (or use `/tako-watch --project KEY`). Watchers open the link Bridge shows, or **Watch** on Takonaut's Bridge page.
+
+- **Shared:** your prompts (including steering and follow-ups), the agent's replies and thinking where the model provides it, and one line per tool call: tool, file name (never the path), redacted command, success or failure, and duration. Turn token and cost counts.
+- **Never shared:** tool output, file contents, command output, diffs, tool error text, images (only their count), the system prompt, or anything from before the broadcast started.
+- Secrets are redacted before anything is sent and again by Takonaut, and an event holding a private key is withheld. Takonaut keeps the last 15 minutes in a relay buffer so late joiners can catch up, and deletes it when the broadcast ends.
+- The footer shows `● Live · N watching`, and Bridge tells you when someone starts watching. Run `/tako-watch` again to see who is watching, change who may watch (anyone no longer allowed is disconnected at once), or stop. `/tako-watch stop` stops.
+- Ending, switching or reloading the session ends the broadcast; it never resumes on its own. It also ends after 8 hours, when Takonaut stops hearing from Bridge for two minutes, when you leave the Project, or when a Project administrator turns live watch off.
+- Watchers cannot send anything to your session. A Project administrator must first enable **Allow live watch** in the Project's Bridge settings (off by default).
+- Teammates can also ask to watch a session linked to a Task (or marked as no-Task work) with **Ask to watch** on Takonaut's Bridge page. Bridge tells you at once and shows `N asking to watch` in the footer, but asks only when the agent pauses or when you run `/tako-watch`, so a run is never interrupted: allow that person, allow everyone in the Project, decline, or decide later. Allowing when you aren't live yet shows the same disclosure and then starts the broadcast. Requests expire after 10 minutes; after a decline that person can't ask again for 30 minutes. Without an interactive UI (print or RPC mode) requests are never shown and expire.
 
 ### Tako Grill
 

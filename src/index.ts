@@ -39,6 +39,7 @@ import { containsSensitiveValue, redactSensitiveValues } from "./redaction";
 import { projectContextCompanions } from "./project-context-tools";
 import { TaskFindingsNotes, projectKeyOf } from "./task-findings";
 import { registerHandoffCommands } from "./task-handoff-commands";
+import { registerLiveWatchCommands } from "./live-watch-commands";
 import { collectLocalContext, formatLocalContextForInjection } from "./context";
 import { readAndPrepareDiagnostic } from "./diagnostics";
 import { BridgeReporter } from "./report.js";
@@ -268,8 +269,15 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	const runner: CommandRunner = async (command, args, options) =>
 		execute(pi, command, args, options);
 	const reporter = new BridgeReporter({ run: runner });
+	// Requests to watch this session live ride on the work-link heartbeat.
+	let receiveWatchRequests: ((sessionKey: string, raw: unknown) => void) | null = null;
 	const workLink = new WorkLinkController({
 		onHeartbeatError: () => reporter.diagnostics.record("connection"),
+		onHeartbeat: (result, piSessionId) =>
+			receiveWatchRequests?.(
+				piSessionId,
+				(result as { watch_requests?: unknown } | null)?.watch_requests,
+			),
 	});
 	let workLinkMode: WorkLinkMode = "nudge";
 	const agentMetrics = new AgentMetricsTracker();
@@ -500,6 +508,12 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		cwd: () => process.cwd(),
 		activeTaskKey: (ctx) => activeRunFor(ctx)?.taskKey ?? null,
 	});
+	receiveWatchRequests = registerLiveWatchCommands(pi, {
+		connection: (ctx) => ensure(ctx),
+		sessionKey: (ctx) => piSessionId(ctx),
+		run: (command, args, options) => runner(command, args, options),
+		cwd: () => process.cwd(),
+	}).receiveRequests;
 
 	// Stable gateway tools remain available alongside the live MCP catalog.
 	pi.registerTool({
