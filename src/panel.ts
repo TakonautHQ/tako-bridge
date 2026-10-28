@@ -35,6 +35,14 @@ interface PanelRun {
 	status?: string;
 }
 
+/** This Pi session's Task link (see /tako-link). */
+export interface PanelWorkLink {
+	taskKey: string | null;
+	taskTitle: string | null;
+	noTaskReason: string | null;
+	startedAt: string;
+}
+
 export type SyncDebugState = "idle" | "running" | "ok" | "error" | "timeout";
 
 export interface SyncOperationDebug {
@@ -56,6 +64,9 @@ export interface BridgePanelDebugData {
 
 export interface BridgePanelData {
 	run: PanelRun | null;
+	/** The Run is still in flight (not completed, cancelled or abandoned). */
+	runActive?: boolean;
+	workLink?: PanelWorkLink | null;
 	showRun: boolean;
 	showStandup: boolean;
 	showTasks: boolean;
@@ -474,6 +485,55 @@ function updateIndicator(
 	];
 }
 
+/** One line each for an active Run and a Task link, folded when they match. */
+function activeWorkIndicator(
+	theme: PanelTheme,
+	width: number,
+	data: BridgePanelData,
+): string[] {
+	const lines: string[] = [];
+	const run = data.runActive ? data.run : null;
+	const link = data.workLink ?? null;
+	const linkedToRun = Boolean(run && link?.taskKey === run.taskKey);
+	if (run) {
+		lines.push(
+			framedSplitLine(
+				theme,
+				width,
+				[
+					{ text: " ▶ DELIVERING ", tone: "success", strong: true },
+					{ text: run.taskKey, tone: "accent", strong: true },
+					{ text: ` · ${humanize(run.executorPhase)}`, tone: "text" },
+					...(linkedToRun ? [{ text: " · linked", tone: "muted" as const }] : []),
+				],
+				[{ text: "/tako-status ", tone: "accent", strong: true }],
+			),
+		);
+	}
+	if (link && !linkedToRun) {
+		const subject: PanelSegment[] = link.taskKey
+			? [
+					{ text: link.taskKey, tone: "accent", strong: true },
+					...(link.taskTitle
+						? [{ text: ` · ${link.taskTitle}`, tone: "text" as const }]
+						: []),
+				]
+			: [
+					{ text: "no Task", tone: "warning" },
+					{ text: ` · ${link.noTaskReason ?? ""}`, tone: "text" },
+				];
+		lines.push(
+			framedSplitLine(
+				theme,
+				width,
+				[{ text: " ● LINKED ", tone: "success", strong: true }, ...subject],
+				[{ text: "/tako-unlink ", tone: "accent", strong: true }],
+			),
+		);
+	}
+	return lines;
+}
+
 export function createBridgePanelWidget(
 	input: BridgePanelData,
 	theme: PanelTheme,
@@ -499,6 +559,7 @@ export function createBridgePanelWidget(
 				]),
 			];
 
+			lines.push(...activeWorkIndicator(theme, resolvedWidth, data));
 			lines.push(...updateIndicator(theme, resolvedWidth, data.updateVersion));
 
 			if (resolvedWidth >= WIDE_PANEL_MIN_WIDTH && sections.length >= 2) {

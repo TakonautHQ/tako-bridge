@@ -1,6 +1,6 @@
 # Tako Bridge
 
-**Current release: [v0.6.0](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.6.0).**
+**Current release: [v0.7.0](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.7.0).**
 
 Tako Bridge is Takonaut's open-source developer workflow extension for the [Pi agent harness](https://github.com/earendil-works/pi). It brings assigned Takonaut work, governed Project Context, repository verification, durable recovery, tests, human-reviewed completion evidence, and Tako Grill Work hierarchy planning into a local Pi session.
 
@@ -24,7 +24,7 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.6.0 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.7.0 -l
 ```
 
 To upgrade an existing project-local installation, run the pinned install command above, then restart Pi or run `/reload` in the existing Pi session. Version-pinned Git installs do not automatically advance to newer release tags.
@@ -37,7 +37,9 @@ To try the update and reporting flows after installing or upgrading, run in Pi:
 /tako-report
 ```
 
-**New in v0.6.0:** live watch. `/tako-watch` broadcasts the current session live, read-only, to everyone in the Project or people you name, after showing exactly what is shared: your prompts, the agent's replies and thinking, and one line per tool call (never tool output, file contents or command output). Teammates can also ask to watch from Takonaut's Bridge or Task page; Bridge asks you when the agent pauses. Secrets are redacted, nothing is kept after the broadcast ends, and watchers cannot send anything to your session. Provider tokens are now redacted even when glued to other text. Requires a Takonaut server with live watch, and a Project administrator must turn on **Allow live watch**.
+**New in v0.7.0:** planning turns. When your Pi is online and idle, it tells Takonaut it can run Planner turns from Planning Studio (**Ask the Planner** with **Auto** or **My Pi**). Each turn runs in a separate, short-lived `pi` process inside a temporary Git worktree at the session's pinned commit, under your system temp folder and never inside your checkout, and the worktree is always removed afterwards. The Planner gets only the Takonaut tools the Planner profile grants plus read-only `read`, `grep`, `find` and `ls` limited to that worktree: no shell, no file edits, no Git. Output streams to the browser while the turn runs, and a turn stops after 10 minutes. Your interactive session is not touched; a turn offered while your agent is busy waits for the next heartbeat. Requires a Takonaut server with Planning Studio.
+
+**v0.6.0:** live watch. `/tako-watch` broadcasts the current session live, read-only, to everyone in the Project or people you name, after showing exactly what is shared: your prompts, the agent's replies and thinking, and one line per tool call (never tool output, file contents or command output). Teammates can also ask to watch from Takonaut's Bridge or Task page; Bridge asks you when the agent pauses. Secrets are redacted, nothing is kept after the broadcast ends, and watchers cannot send anything to your session. Provider tokens are now redacted even when glued to other text. Requires a Takonaut server with live watch, and a Project administrator must turn on **Allow live watch**.
 
 **v0.5.2:** shared Project knowledge. `tako_context_discover` and `tako_context_expand` also search published documents and Tasks (`source: "records"`) and the findings agents shared in the Project (`source: "findings"`). During a delivery run whose Agent Profile may record shared findings, `tako_context_record_finding` shares a short, verified finding with the Project, citing current evidence. Before the first prompt, Bridge adds the current findings about the session's Task (at most 3 KiB, as untrusted reference material). Requires a Takonaut server with shared findings.
 
@@ -216,11 +218,11 @@ When **Grill guidance** is also enabled, Bridge loads the Project's latest valid
 
 The selected Pi model conducts the structured interview; this uses no Takonaut AI credits. The private resumable session covers goal, scope, dependencies, security and privacy, compatibility, repository impact, and success evidence. It stores structured questions, answers, accepted noncritical unknowns, selected guidance identifiers, and design decisions—not model reasoning. Repository and guidance bodies, local paths, clone URLs, credentials, tokens, prompts, and raw errors are excluded from lifecycle events and diagnostics.
 
-The proposal reviewer is interactive and server-paginated. You can edit supported fields and include or exclude actions before preparation. Bridge then prepares the exact current revision, displays the server-prepared preview and Decision Brief, and asks once for confirmation. The action expires after five minutes, is bound to the current user, organization, API key, session, proposal, and evidence manifest, and cannot be replayed. Login/profile changes, logout, reconnect, feature disable, and extension shutdown invalidate in-flight Grill work.
+The proposal reviewer is interactive and server-paginated. You can edit supported fields and include or exclude actions before preparation. Bridge then prepares the exact current revision, displays the server-prepared proposal preview, and asks once for confirmation. The action expires after five minutes, is bound to the current user, organization, API key, session, proposal, and evidence manifest, and cannot be replayed. Login/profile changes, logout, reconnect, feature disable, and extension shutdown invalidate in-flight Grill work.
 
-Confirmed execution applies the complete reviewed batch, first-class dependency graph, and immutable Decision Brief version atomically. New hierarchy items use the selected parent and configured next level. At the Task level, omitted placement defaults to Backlog and omitted assignment remains unassigned; reviewed Sprint, Track, Stage, team, and assignee fields require current permissions and valid Project scope. Approved required children are created upfront, and downstream work receives real Work item or Task dependencies. Grill updates or archives only unchanged Grill-managed children unless you explicitly re-adopt a changed item. Success returns direct links to the resulting children and may offer one child for another Grill, but never starts it automatically.
+Confirmed execution applies the complete reviewed batch, first-class dependency graph, and immutable Decision records atomically. New hierarchy items use the selected parent and configured next level. At the Task level, omitted placement defaults to Backlog and omitted assignment remains unassigned; reviewed Sprint, Track, Stage, team, and assignee fields require current permissions and valid Project scope. Approved required children are created upfront, and downstream work receives real Work item or Task dependencies. Grill updates or archives only unchanged Grill-managed children unless you explicitly re-adopt a changed item. Success returns direct links to the resulting children and may offer one child for another Grill, but never starts it automatically.
 
-Completed Decision Briefs are available as read-only version history on the parent item's Takonaut detail page, including pinned guidance and dependency provenance. Cancelling with `/tako-grill cancel SESSION_ID` erases private questions, answers, selected guidance, and proposal content while retaining only bounded lifecycle metadata. If a prepared action is lost or expires, Bridge invalidates it server-side and returns the session to proposal review before anything can be applied.
+Completed Decisions are available as read-only history on the parent item's Takonaut detail page, including pinned guidance and dependency provenance. Cancelling with `/tako-grill cancel SESSION_ID` erases private questions, answers, selected guidance, and proposal content while retaining only bounded lifecycle metadata. If a prepared action is lost or expires, Bridge invalidates it server-side and returns the session to proposal review before anything can be applied.
 
 ### Pi status panel and Standup draft
 

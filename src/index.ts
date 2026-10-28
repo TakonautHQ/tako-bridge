@@ -63,6 +63,7 @@ import { removeExactTakonautMcpEntry } from "./mcp-config-cleanup";
 import {
 	collectAgenticWorkspaceCompletionEvidence,
 	fromPiExecResult,
+	resolveVerifiedProjectRepoRoot,
 	runGitHubPreflight,
 	type CommandOptions,
 	type CommandResult,
@@ -75,6 +76,7 @@ import {
 	collectTakoGrillReviewedContext,
 	grantTakoGrillContextConsent,
 	formatTakoGrillGuidanceReview,
+	formatTakoGrillInterviewReview,
 	revalidateTakoGrillContextConsent,
 	reviewTakoGrillGuidance,
 	reviewTakoGrillProposal,
@@ -116,11 +118,22 @@ import { parseStartArguments } from "./start";
 import { TaskPicker } from "./task-picker.js";
 import { AgentMetricsTracker } from "./agent-metrics.js";
 import {
+	PlanningTurnController,
+	type PlanningTurnOffer,
+} from "./planning-turns.js";
+import { createPlanningTurnExecutor, installPlanningTurnExitHandlers } from "./planning-turn-executor.js";
+import { spawn as spawnChildProcess } from "node:child_process";
+import {
+	describeWorkLink,
 	detectWorkLinkCandidate,
 	loadRecentLinks,
+	loadStagePreferences,
 	readGitWorkContext,
 	recentLinksPath,
 	saveRecentLink,
+	saveStagePreference,
+	settleLinkStage,
+	stagePreferencesPath,
 	suggestBranchName,
 	type WorkLinkMode,
 	type WorkLinkResult,
@@ -269,23 +282,23 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	const runner: CommandRunner = async (command, args, options) =>
 		execute(pi, command, args, options);
 	const reporter = new BridgeReporter({ run: runner });
-	// Requests to watch this session live ride on the work-link heartbeat.
-	let receiveWatchRequests: ((sessionKey: string, raw: unknown) => void) | null = null;
-	const workLink = new WorkLinkController({
-		onHeartbeatError: () => reporter.diagnostics.record("connection"),
-		onHeartbeat: (result, piSessionId) =>
-			receiveWatchRequests?.(
-				piSessionId,
-				(result as { watch_requests?: unknown } | null)?.watch_requests,
-			),
-	});
-	let workLinkMode: WorkLinkMode = "nudge";
 	const agentMetrics = new AgentMetricsTracker();
+	// Best-effort cache of the live interactive session's current model, for
+	// planning turns (which run in the background, outside any command's
+	// ExtensionContext) to reuse rather than guess a default (DJ-089 follow-up).
+	let lastKnownModel: { provider: string; id: string } | null = null;
+	const rememberModel = (model: { provider: string; id: string } | undefined) => {
+		if (model) lastKnownModel = { provider: model.provider, id: model.id };
+	};
+	pi.on("model_select", (event: { model?: { provider: string; id: string } }) =>
+		rememberModel(event.model),
+	);
 	pi.on("agent_start", () => agentMetrics.onAgentStart());
 	pi.on("agent_end", () => agentMetrics.onAgentIdle());
-	pi.on("turn_end", (event: { message?: unknown }) =>
-		agentMetrics.onTurnEnd(event?.message),
-	);
+	pi.on("turn_end", (event: { message?: unknown }, ctx: ExtensionContext) => {
+		agentMetrics.onTurnEnd(event?.message);
+		rememberModel(ctx.model as { provider: string; id: string } | undefined);
+	});
 	pi.on(
 		"tool_execution_start",
 		(event: { toolName: string; args?: unknown }) =>
@@ -296,6 +309,83 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		(event: { toolName: string; isError?: boolean }) =>
 			agentMetrics.onToolEnd(event.toolName, !!event.isError),
 	);
+	// Emergency net (L4) if Pi itself exits, crashes, or is signaled while a
+	// planning turn's child is running: PlanningTurnController's own cleanup
+	// never runs in that case, since the whole process is going away.
+	installPlanningTurnExitHandlers();
+	const planningTurns = new PlanningTurnController({
+		api: {
+			claimPlanningTurn: (input) => {
+				if (!client) throw new Error("Not connected to Takonaut");
+				return client.claimPlanningTurn(input);
+			},
+			declinePlanningTurn: (input) => {
+				if (!client) throw new Error("Not connected to Takonaut");
+				return client.declinePlanningTurn(input);
+			},
+			streamPlanningTurnDraft: (input) => {
+				if (!client) throw new Error("Not connected to Takonaut");
+				return client.streamPlanningTurnDraft(input);
+			},
+			renewPlanningTurn: (input) => {
+				if (!client) throw new Error("Not connected to Takonaut");
+				return client.renewPlanningTurn(input);
+			},
+			completePlanningTurn: (input) => {
+				if (!client) throw new Error("Not connected to Takonaut");
+				return client.completePlanningTurn(input);
+			},
+		},
+		run: runner,
+		executor: createPlanningTurnExecutor({
+			getClientConfig: () =>
+				cfg ? { serverUrl: cfg.serverUrl, apiKey: cfg.apiKey, orgId: cfg.orgId } : null,
+			getModel: () => lastKnownModel,
+			spawn: (command, args, spawnOptions) =>
+				spawnChildProcess(command, args, {
+					cwd: spawnOptions.cwd,
+					env: spawnOptions.env,
+					detached: true,
+					// stdin carries the prompt (L4: never argv); stdout/stderr are
+					// read back for streaming drafts and a failure excerpt.
+					stdio: ["pipe", "pipe", "pipe"],
+				}),
+			onEvent: () => reporter.diagnostics.record("connection"),
+		}),
+		repoRoot: async (planningOffer) => {
+			// L4: the repo the offer names, not a blind process.cwd(). This app
+			// models one linked GitHub repository per Project (ProjectRepoMapping,
+			// the same mapping verifyRepository() above checks for a Task's
+			// Bridge run), so the offer's project_id resolves to this member's
+			// own saved, previously-verified repository mapping for that Project.
+			if (!cfg) return null;
+			const mapping =
+				cfg.projectRepos[projectRepoMappingKey(cfg.orgId, planningOffer.project_id)];
+			return resolveVerifiedProjectRepoRoot(runner, mapping);
+		},
+		isIdle: () => agentMetrics.isIdle(),
+		onEvent: () => reporter.diagnostics.record("connection"),
+	});
+	// Requests to watch this session live ride on the work-link heartbeat.
+	let receiveWatchRequests: ((sessionKey: string, raw: unknown) => void) | null = null;
+	const workLink = new WorkLinkController({
+		onHeartbeatError: () => reporter.diagnostics.record("connection"),
+		onHeartbeat: (result, piSessionId) => {
+			receiveWatchRequests?.(
+				piSessionId,
+				(result as { watch_requests?: unknown } | null)?.watch_requests,
+			);
+			const offers =
+				(result as { planning_turns?: unknown } | null)?.planning_turns;
+			if (Array.isArray(offers) && offers.length > 0) {
+				void planningTurns
+					.handleOffers(offers as PlanningTurnOffer[])
+					.catch(() => reporter.diagnostics.record("connection"));
+			}
+		},
+		planningCapable: () => true,
+	});
+	let workLinkMode: WorkLinkMode = "nudge";
 	const updates = new BridgeUpdates();
 	const updateCommand = new BridgeUpdateCommand(
 		updates,
@@ -651,8 +741,11 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		c: TakonautConfig,
 		settings: PanelSettings,
 	): BridgePanelData {
+		const run = loadActiveAgenticRun(undefined, c.orgId, piSessionId(ctx));
 		return {
-			run: loadActiveAgenticRun(undefined, c.orgId, piSessionId(ctx)),
+			run,
+			runActive: Boolean(run && !TERMINAL_AGENTIC_STATUSES.has(run.status)),
+			workLink: workLink.snapshot(),
 			showRun: settings.showRun,
 			showStandup: settings.showStandup,
 			showTasks: settings.showTasks,
@@ -1400,6 +1493,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 					session,
 					context,
 					interview,
+					decisions,
 					signal,
 				}) => {
 					signal.throwIfAborted();
@@ -1557,7 +1651,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 							...repositoryLines,
 							`Local state: ${localState}`,
 							`Context budget: ${evidenceBytes} / ${256 * 1024} bytes`,
-							`Prior structured interview decisions: ${Array.isArray(interview?.questions) ? interview.questions.length : 0}`,
+							...formatTakoGrillInterviewReview(interview, decisions),
 							...(reviewedGuidance
 								? formatTakoGrillGuidanceReview(reviewedGuidance)
 								: []),
@@ -1616,6 +1710,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 						approvedEvidence: JSON.stringify({
 							hierarchy: context,
 							prior_interview: interview,
+							prior_decisions: decisions,
 							repository_review: reviewed.review.display,
 							repository_consent_digest: reviewed.review.digest,
 							manifest_digest: recorded.manifest_digest,
@@ -1678,7 +1773,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 						note(
 							ctx,
 							[
-								"Tako Grill applied. Decision Brief and reviewed children are ready.",
+								"Tako Grill applied. Decisions and reviewed children are ready.",
 								...links.map((link) => `Open child: ${link}`),
 								...(selectedChild
 									? [
@@ -1704,7 +1799,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				note(
 					ctx,
 					result.status === "cancelled"
-						? "Tako Grill session cancelled; private content was erased."
+						? "Tako Grill session cancelled; its shared content was erased for every Project member."
 						: result.consent_declined
 							? "Tako Grill context sharing was declined."
 							: result.resumed
@@ -2117,17 +2212,6 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	function describeWorkLink(result: WorkLinkResult): string {
-		const subject = result.task_key
-			? `Working on ${result.task_key} · ${result.task_title ?? ""}`.trim()
-			: `Working without a Task (${result.no_task_reason})`;
-		const moved = result.moved_to ? `\nMoved to ${result.moved_to}.` : "";
-		const warnings = result.warnings.length
-			? `\n${result.warnings.join("\n")}`
-			: "";
-		return `${subject}${moved}${warnings}`;
-	}
-
 	async function linkWork(
 		ctx: ExtensionContext,
 		c: TakonautConfig,
@@ -2135,11 +2219,26 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 		input: { taskKey?: string; noTaskReason?: string; linkSource: WorkLinkSource },
 	): Promise<WorkLinkResult> {
 		const git = await readGitWorkContext(runner, process.cwd());
-		const result = await workLink.link(conn, {
+		const linkInput = {
 			...input,
 			piSessionId: piSessionId(ctx),
 			branchName: git.branch ?? undefined,
 			repository: git.repository ?? git.repoRoot ?? undefined,
+		};
+		const stagesPath = stagePreferencesPath(c.orgId);
+		const result = await settleLinkStage({
+			result: await workLink.link(conn, linkInput),
+			select: ctx.hasUI ? (title, choices) => ctx.ui.select(title, choices) : null,
+			relink: (columnName) =>
+				workLink.link(conn, { ...linkInput, taskKey: input.taskKey, columnName }),
+			preferences: loadStagePreferences(stagesPath),
+			remember: (scope, stage) => {
+				try {
+					saveStagePreference(stagesPath, scope, stage);
+				} catch {
+					// Remembering the Stage is a convenience only.
+				}
+			},
 		});
 		if (result.task_key && git.repoRoot) {
 			try {
@@ -2148,6 +2247,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				// Remembering the last link is a convenience only.
 			}
 		}
+		void refreshPanel(ctx, c);
 		return result;
 	}
 
@@ -2277,6 +2377,8 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			const current = workLink.snapshot();
 			try {
 				const ended = await workLink.end(conn, piSessionId(ctx), "unlinked");
+				const c = currentConfig(ctx);
+				if (c) void refreshPanel(ctx, c);
 				note(
 					ctx,
 					ended
@@ -2636,6 +2738,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 				};
 				saveActiveAgenticRun(active);
 				startTelemetry(ctx, c, active);
+				void refreshPanel(ctx, c);
 				note(
 					ctx,
 					activation.activated
@@ -3791,6 +3894,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	);
 
 	pi.on("session_start", async (_event, ctx) => {
+		rememberModel(ctx.model as { provider: string; id: string } | undefined);
 		reporter.reset();
 		if (ctx.hasUI) updates.start(() => renderUpdateIndicator(ctx));
 		let c: TakonautConfig | null;

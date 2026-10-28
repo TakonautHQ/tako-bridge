@@ -1,3 +1,4 @@
+import { existsSync, lstatSync } from "node:fs";
 import { resolve } from "node:path";
 import type {
 	ActiveAgenticWorktreeState,
@@ -85,6 +86,28 @@ export function normalizeGitHubRemote(remote: string): string | null {
 	const owner = match[1].toLowerCase();
 	const name = match[2].replace(/\.git$/i, "").toLowerCase();
 	return `github.com/${owner}/${name}`;
+}
+
+/**
+ * A saved project-to-repository mapping (ProjectRepoMapping), re-verified
+ * against the live checkout: not a symlink, and its `origin` remote still
+ * matches the fingerprint that was saved when it was linked (L4: used to
+ * resolve a planning turn's worktree repo from the offer's named Project,
+ * rather than trusting a blind `process.cwd()`).
+ */
+export async function resolveVerifiedProjectRepoRoot(
+	run: CommandRunner,
+	mapping: { repoRoot: string; remoteFingerprint: string } | null | undefined,
+): Promise<string | null> {
+	if (!mapping) return null;
+	if (!existsSync(mapping.repoRoot) || lstatSync(mapping.repoRoot).isSymbolicLink()) {
+		return null;
+	}
+	const remote = await run("git", ["-C", mapping.repoRoot, "remote", "get-url", "origin"]);
+	if (failed(remote)) return null;
+	const fingerprint = normalizeGitHubRemote(remote.stdout);
+	if (!fingerprint || fingerprint !== mapping.remoteFingerprint) return null;
+	return mapping.repoRoot;
 }
 
 export async function runGitHubPreflight(

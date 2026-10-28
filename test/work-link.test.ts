@@ -4,14 +4,20 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+	DONT_MOVE,
+	describeWorkLink,
 	detectWorkLinkCandidate,
 	loadRecentLinks,
+	loadStagePreferences,
+	saveStagePreference,
+	settleLinkStage,
 	readGitWorkContext,
 	saveRecentLink,
 	suggestBranchName,
 	taskKeyFromBranch,
 	type WorkLinkApi,
 	WorkLinkController,
+	type WorkLinkResult,
 } from "../src/work-link";
 
 describe("taskKeyFromBranch", () => {
@@ -125,6 +131,29 @@ describe("WorkLinkController", () => {
 		expect(await link.end(a, "s", "unlinked")).toBe(false);
 	});
 
+	it("advertises planning_capable on each heartbeat", async () => {
+		vi.useFakeTimers();
+		const a = api();
+		const link = new WorkLinkController({
+			intervalMs: 1_000,
+			planningCapable: () => false,
+		});
+		await link.link(a, { piSessionId: "s", taskKey: "CP-1", linkSource: "command" });
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(a.heartbeatWorkSession).toHaveBeenCalledWith("s", false);
+		await link.end(a, "s", "unlinked");
+	});
+
+	it("advertises planning_capable: true by default when no callback is given", async () => {
+		vi.useFakeTimers();
+		const a = api();
+		const link = new WorkLinkController({ intervalMs: 1_000 });
+		await link.link(a, { piSessionId: "s", taskKey: "CP-1", linkSource: "command" });
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(a.heartbeatWorkSession).toHaveBeenCalledWith("s", true);
+		await link.end(a, "s", "unlinked");
+	});
+
 	it("hands each heartbeat's response on, with its session", async () => {
 		vi.useFakeTimers();
 		const a = {
@@ -147,5 +176,124 @@ describe("WorkLinkController", () => {
 		await link.link(api(), { piSessionId: "s", noTaskReason: "support", linkSource: "picker" });
 		expect(link.shouldNudge()).toBe(false);
 		await link.end(null, "s", "shutdown");
+	});
+});
+
+function linkResult(over: Partial<WorkLinkResult> = {}): WorkLinkResult {
+	return {
+		work_session_id: "ws-1",
+		task_key: "TP-2",
+		task_title: "Try it",
+		no_task_reason: null,
+		moved_to: null,
+		warnings: [],
+		started_at: "2026-10-27T00:00:00Z",
+		move_choices: [],
+		move_scope: null,
+		...over,
+	};
+}
+
+describe("stage preferences", () => {
+	let dir: string;
+	afterEach(() => rmSync(dir, { recursive: true, force: true }));
+	it("round-trips per Track scope", () => {
+		dir = mkdtempSync(join(tmpdir(), "stages-"));
+		const path = join(dir, "nested", "stages.json");
+		expect(loadStagePreferences(path)).toEqual({});
+		saveStagePreference(path, "TP:t1", "Review");
+		saveStagePreference(path, "TP:t2", "Doing");
+		expect(loadStagePreferences(path)).toEqual({
+			"TP:t1": "Review",
+			"TP:t2": "Doing",
+		});
+	});
+});
+
+describe("settleLinkStage", () => {
+	const ambiguous = linkResult({
+		move_choices: ["Developing", "Review"],
+		move_scope: "TP:t1",
+	});
+
+	it("returns the link as-is when there is nothing to choose", async () => {
+		const select = vi.fn();
+		const relink = vi.fn();
+		const result = linkResult({ moved_to: "Developing" });
+		expect(
+			await settleLinkStage({ result, select, relink, preferences: {} }),
+		).toBe(result);
+		expect(select).not.toHaveBeenCalled();
+		expect(relink).not.toHaveBeenCalled();
+	});
+
+	it("asks, relinks with the picked Stage, and remembers it", async () => {
+		const select = vi.fn().mockResolvedValue("Review");
+		const moved = linkResult({ moved_to: "Review" });
+		const relink = vi.fn().mockResolvedValue(moved);
+		const remember = vi.fn();
+
+		const result = await settleLinkStage({
+			result: ambiguous,
+			select,
+			relink,
+			preferences: {},
+			remember,
+		});
+
+		expect(select).toHaveBeenCalledWith("Move TP-2 to which Stage?", [
+			"Developing",
+			"Review",
+			DONT_MOVE,
+		]);
+		expect(relink).toHaveBeenCalledWith("Review");
+		expect(remember).toHaveBeenCalledWith("TP:t1", "Review");
+		expect(result).toBe(moved);
+	});
+
+	it("offers the last pick for this Track first", async () => {
+		const select = vi.fn().mockResolvedValue("Review (last used)");
+		const relink = vi.fn().mockResolvedValue(linkResult({ moved_to: "Review" }));
+
+		await settleLinkStage({
+			result: ambiguous,
+			select,
+			relink,
+			preferences: { "TP:t1": "Review" },
+		});
+
+		expect(select.mock.calls[0][1]).toEqual([
+			"Review (last used)",
+			"Developing",
+			DONT_MOVE,
+		]);
+		expect(relink).toHaveBeenCalledWith("Review");
+	});
+
+	it("leaves the Task in place on Don't move, cancel, or no UI", async () => {
+		const relink = vi.fn();
+		for (const select of [
+			vi.fn().mockResolvedValue(DONT_MOVE),
+			vi.fn().mockResolvedValue(undefined),
+			null,
+		]) {
+			expect(
+				await settleLinkStage({ result: ambiguous, select, relink, preferences: {} }),
+			).toBe(ambiguous);
+		}
+		expect(relink).not.toHaveBeenCalled();
+	});
+});
+
+describe("describeWorkLink", () => {
+	it("says when a Stage choice is still open", () => {
+		expect(
+			describeWorkLink(linkResult({ move_choices: ["Developing", "Review"] })),
+		).toBe(
+			"Working on TP-2 · Try it\nNot moved: pick a Stage (Developing, Review) with /tako-link TP-2.",
+		);
+		expect(describeWorkLink(linkResult({ moved_to: "Review" }))).toBe(
+			"Working on TP-2 · Try it\nMoved to Review.",
+		);
 	});
 });

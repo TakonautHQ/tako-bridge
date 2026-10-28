@@ -23,6 +23,10 @@ export interface WorkLinkResult {
 	moved_to: string | null;
 	warnings: string[];
 	started_at: string;
+	/** Several Stages fit: nothing moved until the developer picks one. */
+	move_choices?: string[];
+	/** `PROJECT:track_id`, the key for remembering the pick. */
+	move_scope?: string | null;
 }
 
 export interface WorkLinkApi {
@@ -33,8 +37,10 @@ export interface WorkLinkApi {
 		linkSource: WorkLinkSource;
 		branchName?: string;
 		repository?: string;
+		/** The Stage picked from a previous link's `move_choices`. */
+		columnName?: string;
 	}): Promise<WorkLinkResult>;
-	heartbeatWorkSession(piSessionId: string): Promise<unknown>;
+	heartbeatWorkSession(piSessionId: string, planningCapable?: boolean): Promise<unknown>;
 	endWorkSession(piSessionId: string, reason: "unlinked" | "shutdown"): Promise<unknown>;
 }
 
@@ -126,6 +132,86 @@ export function saveRecentLink(path: string, repoRoot: string, taskKey: string):
 	}
 }
 
+export function stagePreferencesPath(orgId: string): string {
+	const safeOrgId = orgId.replace(/[^a-zA-Z0-9-]/g, "_");
+	return join(homedir(), ".takonaut", "work-links", `stages-${safeOrgId}.json`);
+}
+
+/** Last Stage picked on link, keyed by `PROJECT:track_id`. */
+export type StagePreferences = Record<string, string>;
+
+export function loadStagePreferences(path: string): StagePreferences {
+	try {
+		const parsed = JSON.parse(readFileSync(path, "utf-8"));
+		return parsed && typeof parsed === "object" ? parsed : {};
+	} catch {
+		return {};
+	}
+}
+
+export function saveStagePreference(path: string, scope: string, stage: string): void {
+	const prefs = loadStagePreferences(path);
+	prefs[scope] = stage;
+	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+	const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+	try {
+		writeFileSync(tmp, JSON.stringify(prefs, null, 2) + "\n", { mode: 0o600 });
+		chmodSync(tmp, 0o600);
+		renameSync(tmp, path);
+	} finally {
+		rmSync(tmp, { force: true });
+	}
+}
+
+export const DONT_MOVE = "Don't move";
+const LAST_USED = " (last used)";
+
+/**
+ * When the link left several Stages open, ask which one and relink with it.
+ * The last pick for the Track is offered first. Without a UI, or on
+ * "Don't move" / cancel, the Task stays where it is.
+ */
+export async function settleLinkStage(input: {
+	result: WorkLinkResult;
+	select: ((title: string, options: string[]) => Promise<string | undefined>) | null;
+	relink: (columnName: string) => Promise<WorkLinkResult>;
+	preferences: StagePreferences;
+	remember?: (scope: string, stage: string) => void;
+}): Promise<WorkLinkResult> {
+	const { result, select } = input;
+	const choices = result.move_choices ?? [];
+	if (!choices.length || !select) return result;
+	const scope = result.move_scope ?? null;
+	const last = scope ? input.preferences[scope] : undefined;
+	const ordered =
+		last && choices.includes(last)
+			? [`${last}${LAST_USED}`, ...choices.filter((c) => c !== last)]
+			: choices;
+	const picked = await select(`Move ${result.task_key ?? "this Task"} to which Stage?`, [
+		...ordered,
+		DONT_MOVE,
+	]);
+	if (!picked || picked === DONT_MOVE) return result;
+	const stage = picked.endsWith(LAST_USED) ? picked.slice(0, -LAST_USED.length) : picked;
+	const moved = await input.relink(stage);
+	if (scope) input.remember?.(scope, stage);
+	return moved;
+}
+
+export function describeWorkLink(result: WorkLinkResult): string {
+	const subject = result.task_key
+		? `Working on ${result.task_key} · ${result.task_title ?? ""}`.trim()
+		: `Working without a Task (${result.no_task_reason})`;
+	const moved = result.moved_to ? `\nMoved to ${result.moved_to}.` : "";
+	const choices = result.move_choices ?? [];
+	const open =
+		!result.moved_to && choices.length && result.task_key
+			? `\nNot moved: pick a Stage (${choices.join(", ")}) with /tako-link ${result.task_key}.`
+			: "";
+	const warnings = result.warnings.length ? `\n${result.warnings.join("\n")}` : "";
+	return `${subject}${moved}${open}${warnings}`;
+}
+
 /**
  * Pick the Task this session is most likely working on.
  * Active Run beats branch name; the branch beats the last link for this repo.
@@ -162,6 +248,8 @@ export class WorkLinkController {
 			onHeartbeatError?: (error: unknown) => void;
 			/** Each heartbeat's response (it carries requests to watch live). */
 			onHeartbeat?: (result: unknown, piSessionId: string) => void;
+			/** Whether this Pi build can run an offered planning turn (default: true). */
+			planningCapable?: () => boolean;
 		} = {},
 	) {}
 
@@ -213,7 +301,7 @@ export class WorkLinkController {
 		this.stopHeartbeat();
 		this.timer = setInterval(() => {
 			api
-				.heartbeatWorkSession(piSessionId)
+				.heartbeatWorkSession(piSessionId, this.options.planningCapable?.() ?? true)
 				.then((result) => this.options.onHeartbeat?.(result, piSessionId))
 				.catch((error) => this.options.onHeartbeatError?.(error));
 		}, this.options.intervalMs ?? WORK_LINK_HEARTBEAT_MS);

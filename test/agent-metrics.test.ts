@@ -44,4 +44,20 @@ describe("AgentMetricsTracker", () => {
 		m.reset();
 		expect(m.snapshot().toolCalls).toBe(0);
 	});
+
+	it("tracks idle state from agent_start/agent_end, idle until the agent first starts", () => {
+		const m = new AgentMetricsTracker();
+		expect(m.isIdle()).toBe(true);
+		m.onAgentStart();
+		expect(m.isIdle()).toBe(false);
+		m.onAgentIdle();
+		expect(m.isIdle()).toBe(true);
+	});
+
+	it("reset() restores idle state", () => {
+		const m = new AgentMetricsTracker();
+		m.onAgentStart();
+		m.reset();
+		expect(m.isIdle()).toBe(true);
+	});
 });

@@ -1,9 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	collectAgenticWorkspaceCompletionEvidence,
 	collectGitHubPrEvidence,
 	fromPiExecResult,
 	normalizeGitHubRemote,
+	resolveVerifiedProjectRepoRoot,
 	runGitHubPreflight,
 	type CommandRunner,
 } from "../src/git";
@@ -170,6 +174,58 @@ describe("GitHub repository preflight", () => {
 				"main",
 			]),
 		).rejects.toThrow("working tree is not clean");
+	});
+});
+
+describe("resolveVerifiedProjectRepoRoot (L4)", () => {
+	let root: string;
+
+	beforeEach(() => {
+		root = mkdtempSync(join(tmpdir(), "pte-repo-mapping-"));
+	});
+
+	afterEach(() => {
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	it("returns null when there is no saved mapping at all", async () => {
+		await expect(resolveVerifiedProjectRepoRoot(runner({}), null)).resolves.toBeNull();
+	});
+
+	it("returns the mapped root when the live remote still matches the saved fingerprint", async () => {
+		const result = await resolveVerifiedProjectRepoRoot(
+			runner({ [`git -C ${root} remote get-url origin`]: { stdout: "git@github.com:cureocity/takonaut.git\n" } }),
+			{ repoRoot: root, remoteFingerprint: "github.com/cureocity/takonaut" },
+		);
+		expect(result).toBe(root);
+	});
+
+	it("returns null when the mapped directory's remote no longer matches the saved fingerprint", async () => {
+		const result = await resolveVerifiedProjectRepoRoot(
+			runner({ [`git -C ${root} remote get-url origin`]: { stdout: "git@github.com:someone-else/other-repo.git\n" } }),
+			{ repoRoot: root, remoteFingerprint: "github.com/cureocity/takonaut" },
+		);
+		expect(result).toBeNull();
+	});
+
+	it("returns null when the mapped path no longer exists", async () => {
+		const result = await resolveVerifiedProjectRepoRoot(runner({}), {
+			repoRoot: join(root, "gone"),
+			remoteFingerprint: "github.com/cureocity/takonaut",
+		});
+		expect(result).toBeNull();
+	});
+
+	it("returns null when the mapped path is a symlink, even to somewhere with a matching remote", async () => {
+		const real = mkdtempSync(join(tmpdir(), "pte-repo-real-"));
+		const link = join(root, "link");
+		symlinkSync(real, link);
+		const result = await resolveVerifiedProjectRepoRoot(
+			runner({ [`git -C ${link} remote get-url origin`]: { stdout: "git@github.com:cureocity/takonaut.git\n" } }),
+			{ repoRoot: link, remoteFingerprint: "github.com/cureocity/takonaut" },
+		);
+		expect(result).toBeNull();
+		rmSync(real, { recursive: true, force: true });
 	});
 });
 

@@ -7,6 +7,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { TakonautConfig } from "./config";
 import type { AgenticWorkspaceCompletionEvidence } from "./git";
 import type { CapabilityEnvelope, SignedAgenticManifest } from "./manifest";
+import type { PlanningTurnAdrSnapshot } from "./planning-turns";
 import { bridgeServerUrl } from "./server-url.js";
 import { BRIDGE_VERSION } from "./version.js";
 import type { WorkLinkResult, WorkLinkSource } from "./work-link";
@@ -508,6 +509,7 @@ export class TakonautClient {
 		linkSource: WorkLinkSource;
 		branchName?: string;
 		repository?: string;
+		columnName?: string;
 	}): Promise<WorkLinkResult> {
 		return this.call(
 			"link_bridge_work_session",
@@ -518,6 +520,8 @@ export class TakonautClient {
 				link_source: input.linkSource,
 				branch_name: input.branchName ?? "",
 				repository: input.repository ?? "",
+				// Only sent when picked, so older servers keep accepting the call.
+				...(input.columnName ? { column_name: input.columnName } : {}),
 			},
 			10_000,
 		);
@@ -529,11 +533,114 @@ export class TakonautClient {
 		return this.call("get_bridge_work_policy", { repository }, 10_000);
 	}
 
-	heartbeatWorkSession(piSessionId: string): Promise<unknown> {
+	heartbeatWorkSession(
+		piSessionId: string,
+		planningCapable = true,
+	): Promise<unknown> {
 		return this.call(
 			"heartbeat_bridge_work_session",
-			{ pi_session_id: piSessionId },
+			{ pi_session_id: piSessionId, planning_capable: planningCapable },
 			10_000,
+		);
+	}
+
+	claimPlanningTurn(input: {
+		turnId: string;
+		sessionId: string;
+		token: string;
+		leaseSeconds: number;
+	}): Promise<{
+		run_id: string;
+		status: string;
+		granted_tools: string[];
+		adr_snapshot: PlanningTurnAdrSnapshot | null;
+	}> {
+		return this.call(
+			"claim_planning_turn",
+			{
+				turn_id: input.turnId,
+				session_id: input.sessionId,
+				token: input.token,
+				lease_seconds: input.leaseSeconds,
+			},
+			10_000,
+		);
+	}
+
+	declinePlanningTurn(input: { turnId: string; reason: string }): Promise<unknown> {
+		return this.call(
+			"decline_planning_turn",
+			{ turn_id: input.turnId, reason: input.reason },
+			10_000,
+		);
+	}
+
+	streamPlanningTurnDraft(input: {
+		turnId: string;
+		runId: string;
+		sessionId: string;
+		token: string;
+		text: string;
+	}): Promise<unknown> {
+		return this.call(
+			"stream_planning_turn_draft",
+			{
+				turn_id: input.turnId,
+				run_id: input.runId,
+				session_id: input.sessionId,
+				token: input.token,
+				text: input.text,
+			},
+			10_000,
+		);
+	}
+
+	/**
+	 * Extends a claimed planning turn's lease (N1): called every ~30s for the
+	 * whole turn, independent of streamed output, so the Bridge's reaper
+	 * never fails a turn that is merely slow between drafts.
+	 */
+	renewPlanningTurn(input: {
+		turnId: string;
+		runId: string;
+		sessionId: string;
+		token: string;
+		leaseSeconds: number;
+	}): Promise<unknown> {
+		return this.call(
+			"renew_planning_turn",
+			{
+				turn_id: input.turnId,
+				run_id: input.runId,
+				session_id: input.sessionId,
+				token: input.token,
+				lease_seconds: input.leaseSeconds,
+			},
+			10_000,
+		);
+	}
+
+	completePlanningTurn(input: {
+		turnId: string;
+		runId: string;
+		sessionId: string;
+		token: string;
+		ok: boolean;
+		outputMarkdown?: string;
+		error?: string;
+	}): Promise<{ run_id: string; status: string }> {
+		return this.call(
+			"complete_planning_turn",
+			{
+				turn_id: input.turnId,
+				run_id: input.runId,
+				session_id: input.sessionId,
+				token: input.token,
+				ok: input.ok,
+				output_markdown: input.outputMarkdown ?? "",
+				error: input.error ?? "",
+			},
+			30_000,
 		);
 	}
 

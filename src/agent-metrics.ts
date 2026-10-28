@@ -52,6 +52,7 @@ export function describeToolCall(toolName: string, args: unknown): string {
 /** Accumulates per-session agent metrics from Pi lifecycle events. */
 export class AgentMetricsTracker {
 	private metrics: AgentMetricsSnapshot = AgentMetricsTracker.empty();
+	private idle = true;
 
 	static empty(): AgentMetricsSnapshot {
 		return {
@@ -68,6 +69,12 @@ export class AgentMetricsTracker {
 
 	reset(): void {
 		this.metrics = AgentMetricsTracker.empty();
+		this.idle = true;
+	}
+
+	/** True until the agent first starts, then tracks agent_start/agent_end. */
+	isIdle(): boolean {
+		return this.idle;
 	}
 
 	snapshot(): AgentMetricsSnapshot {
@@ -75,6 +82,7 @@ export class AgentMetricsTracker {
 	}
 
 	onAgentStart(): void {
+		this.idle = false;
 		this.metrics.currentActivity = "Thinking";
 	}
 
@@ -99,6 +107,7 @@ export class AgentMetricsTracker {
 	}
 
 	onAgentIdle(): void {
+		this.idle = true;
 		this.metrics.currentActivity = "Waiting for input";
 	}
 }

@@ -177,6 +177,23 @@ describe("Tako Grill protocol", () => {
 							{
 								id: "goal",
 								answer: "Reduce cycle time by 20%.",
+								answered_by: "other-member",
+								open: false,
+							},
+						],
+						truncated: false,
+					};
+				}
+				if (name === "list_tako_grill_decisions") {
+					return {
+						session_id: sessionId,
+						decisions: [
+							{
+								decision_id: "d1",
+								title: "Keep the existing public contract.",
+								status: "settled",
+								chosen: "Preserve it",
+								answered_by: "other-member",
 							},
 						],
 						truncated: false,
@@ -196,10 +213,20 @@ describe("Tako Grill protocol", () => {
 							questions: [
 								expect.objectContaining({
 									answer: "Reduce cycle time by 20%.",
+									answered_by: "other-member",
 								}),
 							],
 						},
+						decisions: [
+							expect.objectContaining({
+								title: "Keep the existing public contract.",
+								status: "settled",
+								answered_by: "other-member",
+							}),
+						],
 					});
+				} else {
+					expect(input).toMatchObject({ interview: null, decisions: null });
 				}
 				return { approved: true, approvedEvidence: "Reviewed evidence." };
 			},
@@ -386,6 +413,146 @@ describe("Tako Grill protocol", () => {
 		);
 		expect(prompt).toContain("tako_mcp_record_tako_grill_round");
 		expect(prompt).toContain("tako_mcp_create_tako_grill_proposal");
+		expect(prompt).not.toContain("private");
+		expect(prompt).toContain("shared with every Project member");
+		expect(prompt).toContain("tako_mcp_record_tako_grill_decision");
+		expect(prompt).toContain("status open");
+	});
+
+	it("paginates attributed answers, open questions, and live Decisions when resuming a shared session", async () => {
+		const grill = await loadGrillModule();
+		const sessionId = "5228dbb1-60a7-4ea8-aa12-4b6876df7894";
+		const parentId = "876540a9-670a-47df-bc7b-c8a9253e6b24";
+		const Controller = grill.TakoGrillController as unknown as new (
+			dependencies: Record<string, unknown>,
+		) => { run(args: string): Promise<Record<string, unknown>> };
+		const interviewPages = [
+			{
+				questions: [
+					{ id: "goal", answer: "Reduce cycle time.", answered_by: "alice", open: false },
+				],
+				truncated: true,
+			},
+			{
+				questions: [{ id: "scope", answer: null, answered_by: null, open: true }],
+				truncated: false,
+			},
+		];
+		const decisionPages = [
+			{
+				decisions: [
+					{ decision_id: "d1", title: "Goal", status: "settled", answered_by: "alice" },
+				],
+				truncated: true,
+			},
+			{
+				decisions: [
+					{ decision_id: "d2", title: "Scope", status: "open", answered_by: null },
+				],
+				truncated: false,
+			},
+		];
+		let reviewed: Record<string, unknown> | null = null;
+		const controller = new Controller({
+			callTool: async (name: string) => {
+				if (name === "start_tako_grill_session") {
+					return { session_id: sessionId, status: "context_review", resumed: true };
+				}
+				if (name === "get_tako_grill_context") {
+					return {
+						parent: { id: parentId, title: "Checkout", level_name: "Brief" },
+						target: { kind: "work_item", level_name: "Story" },
+					};
+				}
+				if (name === "get_tako_grill_interview") {
+					return interviewPages.shift();
+				}
+				if (name === "list_tako_grill_decisions") {
+					return decisionPages.shift();
+				}
+				throw new Error(`unexpected tool ${name}`);
+			},
+			resolveParent: async () => ({ projectKey: "ATL", parentId }),
+			reviewContext: async (input: Record<string, unknown>) => {
+				reviewed = input;
+				return { approved: true, approvedEvidence: "Reviewed evidence." };
+			},
+			sendPrompt: () => {},
+		});
+
+		await controller.run(parentId);
+
+		expect(reviewed).toMatchObject({
+			interview: {
+				questions: [
+					expect.objectContaining({ id: "goal", answered_by: "alice", open: false }),
+					expect.objectContaining({ id: "scope", answered_by: null, open: true }),
+				],
+			},
+			decisions: [
+				expect.objectContaining({ decision_id: "d1", status: "settled" }),
+				expect.objectContaining({ decision_id: "d2", status: "open" }),
+			],
+		});
+	});
+
+	it("formats attributed answers, open questions and live Decisions for human review", async () => {
+		const grill = await loadGrillModule();
+		const formatReview = grill.formatTakoGrillInterviewReview as (
+			interview: Record<string, unknown> | null,
+			decisions: Record<string, unknown>[] | null,
+		) => string[];
+
+		expect(formatReview(null, null)).toEqual([
+			"Prior structured interview questions: 0 (0 answered, 0 open)",
+			"Live Grill Decisions: 0",
+		]);
+
+		const lines = formatReview(
+			{
+				questions: [
+					{
+						id: "goal",
+						text: "What outcome defines success?",
+						answer: "Reduce cycle time by 20%.",
+						answered_by: "alice",
+						open: false,
+					},
+					{
+						id: "scope",
+						text: "What is explicitly out of scope?",
+						answer: null,
+						answered_by: null,
+						open: true,
+					},
+				],
+			},
+			[
+				{
+					decision_id: "d1",
+					title: "Preserve the public contract",
+					status: "settled",
+					chosen: "Keep it",
+					answered_by: "alice",
+				},
+				{
+					decision_id: "d2",
+					title: "What is explicitly out of scope?",
+					status: "open",
+					chosen: null,
+					answered_by: null,
+				},
+			],
+		);
+
+		expect(lines).toEqual([
+			"Prior structured interview questions: 2 (1 answered, 1 open)",
+			"  answered by alice: What outcome defines success? — Reduce cycle time by 20%.",
+			"  open question: What is explicitly out of scope?",
+			"Live Grill Decisions: 2",
+			"  settled by alice: Preserve the public contract — chosen: Keep it",
+			"  open: What is explicitly out of scope?",
+		]);
 	});
 
 	it("blocks proposals on critical unknowns and retains accepted noncritical unknowns", async () => {
@@ -1559,7 +1726,7 @@ describe("Tako Grill repository evidence", () => {
 			protected: false,
 		});
 
-		it("loads paginated actions, renders a Decision Brief preview, and blocks over-100 mutations", async () => {
+		it("loads paginated actions, renders a Grill proposal preview, and blocks over-100 mutations", async () => {
 			const grill = await loadGrillModule();
 			const Reviewer = grill.TakoGrillProposalReviewer as unknown as new (
 				dependencies: Record<string, unknown>,
@@ -1808,7 +1975,7 @@ describe("Tako Grill repository evidence", () => {
 			const confirmations = [false, true, true];
 			const confirm = vi.fn(async (_title: string, detail: string) => {
 				events.push("confirm");
-				expect(detail).toContain("Decision Brief preview");
+				expect(detail).toContain("Grill proposal preview");
 				expect(detail).toContain('"mutation_count": 1');
 				expect(detail).not.toContain("secret-token");
 				return confirmations.shift() ?? false;

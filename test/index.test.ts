@@ -1162,6 +1162,138 @@ describe("Takonaut Pi Agentic Delivery lifecycle", () => {
 		expect(prompt).toContain('"manifest_digest":"' + "a".repeat(64));
 	});
 
+	it("shows attributed answers, open questions and live Decisions when resuming the Project-shared Grill session", async () => {
+		const { commands, pi } = setup();
+		const sessionId = "5228dbb1-60a7-4ea8-aa12-4b6876df7894";
+		const parentId = "876540a9-670a-47df-bc7b-c8a9253e6b24";
+		mocks.callTool.mockImplementation(
+			async (name: string, args: Record<string, unknown>) => {
+				if (name === "start_tako_grill_session") {
+					return {
+						session_id: sessionId,
+						status: "context_review",
+						context_revision: 0,
+						resumed: true,
+					};
+				}
+				if (name === "get_tako_grill_context") {
+					return {
+						parent: { id: parentId, title: "Checkout", level_name: "Brief" },
+						target: { kind: "work_item", level_name: "Story" },
+					};
+				}
+				if (name === "get_tako_grill_interview") {
+					return {
+						questions: [
+							{
+								id: "goal",
+								text: "What outcome defines success?",
+								answer: "Reduce cycle time by 20%.",
+								answered_by: "alice",
+								open: false,
+							},
+							{
+								id: "scope",
+								text: "What is explicitly out of scope?",
+								answer: null,
+								answered_by: null,
+								open: true,
+							},
+						],
+						truncated: false,
+					};
+				}
+				if (name === "list_tako_grill_decisions") {
+					return {
+						session_id: sessionId,
+						decisions: [
+							{
+								decision_id: "d1",
+								title: "Preserve the public contract",
+								status: "settled",
+								chosen: "Keep it",
+								answered_by: "alice",
+							},
+						],
+						truncated: false,
+					};
+				}
+				if (name === "list_tako_grill_repositories") {
+					return { project_key: "ATL", repositories: [], truncated: false };
+				}
+				if (name === "record_tako_grill_repository_context") {
+					return {
+						session_id: sessionId,
+						context_revision: 1,
+						manifest_digest: "a".repeat(64),
+						final_review_blocked: false,
+					};
+				}
+				throw new Error(`unexpected tool: ${name}`);
+			},
+		);
+		const ctx = {
+			...commandContext(),
+			model: { id: "test-model", provider: "test-provider" },
+		};
+
+		await commands.get("tako-grill")?.(
+			`https://takonaut.app/projects/ATL/work-items/${parentId}`,
+			ctx,
+		);
+
+		expect(ctx.ui.confirm).toHaveBeenCalledOnce();
+		const [, consentMessage] = ctx.ui.confirm.mock.calls[0];
+		expect(consentMessage).toContain(
+			"Prior structured interview questions: 2 (1 answered, 1 open)",
+		);
+		expect(consentMessage).toContain(
+			"answered by alice: What outcome defines success? \u2014 Reduce cycle time by 20%.",
+		);
+		expect(consentMessage).toContain(
+			"open question: What is explicitly out of scope?",
+		);
+		expect(consentMessage).toContain("Live Grill Decisions: 1");
+		expect(consentMessage).toContain(
+			"settled by alice: Preserve the public contract \u2014 chosen: Keep it",
+		);
+		expect(mocks.callTool.mock.calls.map(([name]) => name)).toEqual([
+			"start_tako_grill_session",
+			"get_tako_grill_context",
+			"get_tako_grill_interview",
+			"list_tako_grill_decisions",
+			"list_tako_grill_repositories",
+			"record_tako_grill_repository_context",
+		]);
+		const [prompt] = pi.sendUserMessage.mock.calls[0];
+		expect(prompt).toContain('"prior_decisions"');
+		expect(prompt).toContain("Preserve the public contract");
+	});
+
+	it("reports shared content erased, not private, when a Grill session is cancelled", async () => {
+		const { commands } = setup();
+		const sessionId = "5228dbb1-60a7-4ea8-aa12-4b6876df7894";
+		mocks.callTool.mockImplementation(async (name: string) => {
+			if (name === "cancel_tako_grill_session") {
+				return { session_id: sessionId, status: "cancelled" };
+			}
+			throw new Error(`unexpected tool: ${name}`);
+		});
+		const notify = vi.fn();
+		const ctx = commandContext(notify);
+
+		await commands.get("tako-grill")?.(`cancel ${sessionId}`, ctx);
+
+		expect(notify).toHaveBeenCalledWith(
+			expect.stringContaining("its shared content was erased"),
+			expect.anything(),
+		);
+		expect(notify).not.toHaveBeenCalledWith(
+			expect.stringContaining("private content"),
+			expect.anything(),
+		);
+	});
+
 	it("reviews a resumed proposal through the extension-lifetime controller and clears it on logout", async () => {
 		const { commands } = setup();
 		const sessionId = "5228dbb1-60a7-4ea8-aa12-4b6876df7894";

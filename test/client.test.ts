@@ -80,6 +80,20 @@ describe("TakonautClient transport", () => {
 		expect(mocks.connect).toHaveBeenCalledOnce();
 	});
 
+	it("sends a picked link Stage only when there is one", async () => {
+		const client = new TakonautClient(cfg);
+		await client.linkWorkSession({ piSessionId: "pi-1", taskKey: "TP-2", linkSource: "command" });
+		await client.linkWorkSession({
+			piSessionId: "pi-1",
+			taskKey: "TP-2",
+			linkSource: "command",
+			columnName: "Review",
+		});
+		const args = mocks.callTool.mock.calls.map(([call]) => call.arguments);
+		expect(args[0]).not.toHaveProperty("column_name");
+		expect(args[1]).toMatchObject({ task_key: "TP-2", column_name: "Review" });
+	});
+
 	it("calls a discovered MCP tool generically and enforces the argument bound", async () => {
 		mocks.callTool.mockResolvedValue({
 			content: [{ type: "text", text: JSON.stringify({ tasks: ["PAY-1"] }) }],

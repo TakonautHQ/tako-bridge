@@ -353,6 +353,64 @@ describe("Tako Bridge responsive panel", () => {
 		).not.toContain("bad");
 	});
 
+	describe("active work indicator", () => {
+		const idle = { ...panelData, run: null, showRun: false, showTasks: false, showStandup: false };
+		const link = {
+			taskKey: "TP-2",
+			taskTitle: "Test linking",
+			noTaskReason: null,
+			startedAt: "2026-10-27T00:00:00Z",
+		};
+
+		it("shows a linked Task, even with every section switched off", () => {
+			const lines = render(100, { ...idle, workLink: link });
+			expectFullWidth(lines, 100);
+			expect(plain(lines)[1]).toMatch(/● LINKED TP-2 · Test linking.*\/tako-unlink/);
+		});
+
+		it("shows work without a Task with its reason", () => {
+			const lines = plain(
+				render(100, {
+					...idle,
+					workLink: { ...link, taskKey: null, taskTitle: null, noTaskReason: "support" },
+				}),
+			);
+			expect(lines[1]).toMatch(/● LINKED no Task · support/);
+		});
+
+		it("shows an active Run, folding in a link to the same Task", () => {
+			const run = { taskKey: "TP-2", executorPhase: "executing" };
+			const lines = plain(
+				render(100, { ...idle, run, runActive: true, workLink: link }),
+			);
+			expect(lines[1]).toMatch(/▶ DELIVERING TP-2 · executing · linked.*\/tako-status/);
+			expect(lines.join("\n")).not.toContain("● LINKED");
+		});
+
+		it("shows both when the Run and the link are different Tasks", () => {
+			const run = { taskKey: "TP-9", executorPhase: "planning" };
+			const lines = plain(
+				render(100, { ...idle, run, runActive: true, workLink: link }),
+			);
+			expect(lines[1]).toContain("▶ DELIVERING TP-9 · planning");
+			expect(lines[2]).toContain("● LINKED TP-2");
+		});
+
+		it("stays hidden when nothing is linked and no Run is active", () => {
+			const run = { taskKey: "TP-9", executorPhase: "completed" };
+			const text = plain(render(100, { ...idle, run, runActive: false })).join("\n");
+			expect(text).not.toContain("DELIVERING");
+			expect(text).not.toContain("LINKED");
+		});
+
+		it("keeps the frame intact on narrow terminals", () => {
+			expectFullWidth(
+				render(40, { ...idle, runActive: true, run: { taskKey: "TP-9", executorPhase: "planning" }, workLink: link }),
+				40,
+			);
+		});
+	});
+
 	it("renders delayed state as a complete full-width frame", () => {
 		const width = 72;
 		const lines = createBridgePanelErrorWidget(
