@@ -1,6 +1,6 @@
 # Tako Bridge
 
-**Current release: [v0.7.0](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.7.0).**
+**Current release: [v0.7.1](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.7.1).**
 
 Tako Bridge is Takonaut's open-source developer workflow extension for the [Pi agent harness](https://github.com/earendil-works/pi). It brings assigned Takonaut work, governed Project Context, repository verification, durable recovery, tests, human-reviewed completion evidence, and Tako Grill Work hierarchy planning into a local Pi session.
 
@@ -24,7 +24,7 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.7.0 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.7.1 -l
 ```
 
 To upgrade an existing project-local installation, run the pinned install command above, then restart Pi or run `/reload` in the existing Pi session. Version-pinned Git installs do not automatically advance to newer release tags.
@@ -37,7 +37,9 @@ To try the update and reporting flows after installing or upgrading, run in Pi:
 /tako-report
 ```
 
-**New in v0.7.0:** planning turns. When your Pi is online and idle, it tells Takonaut it can run Planner turns from Planning Studio (**Ask the Planner** with **Auto** or **My Pi**). Each turn runs in a separate, short-lived `pi` process inside a temporary Git worktree at the session's pinned commit, under your system temp folder and never inside your checkout, and the worktree is always removed afterwards. The Planner gets only the Takonaut tools the Planner profile grants plus read-only `read`, `grep`, `find` and `ls` limited to that worktree: no shell, no file edits, no Git. Output streams to the browser while the turn runs, and a turn stops after 10 minutes. Your interactive session is not touched; a turn offered while your agent is busy waits for the next heartbeat. Requires a Takonaut server with Planning Studio.
+**New in v0.7.1:** dependency security updates. Overrides move undici to 8.12.2, qs to 6.16.1, body-parser to 2.4.0, zod to 4.6.6, ip-address to 10.7.4 and fast-uri to 3.1.9 (runtime, via the MCP SDK), and Vitest to 4.1.12 (dev); `bun audit` is clean. Includes everything in v0.7.0.
+
+**v0.7.0:** planning turns. When your Pi is online and idle, it tells Takonaut it can run Planner turns from Planning Studio (**Ask the Planner** with **Auto** or **My Pi**). Each turn runs in a separate, short-lived `pi` process inside a temporary Git worktree at the session's pinned commit, under your system temp folder and never inside your checkout, and the worktree is always removed afterwards. The Planner gets only the Takonaut tools the Planner profile grants plus read-only `read`, `grep`, `find` and `ls` limited to that worktree: no shell, no file edits, no Git. Output streams to the browser while the turn runs, and a turn stops after 10 minutes. Your interactive session is not touched; a turn offered while your agent is busy waits for the next heartbeat. Requires a Takonaut server with Planning Studio.
 
 **v0.6.0:** live watch. `/tako-watch` broadcasts the current session live, read-only, to everyone in the Project or people you name, after showing exactly what is shared: your prompts, the agent's replies and thinking, and one line per tool call (never tool output, file contents or command output). Teammates can also ask to watch from Takonaut's Bridge or Task page; Bridge asks you when the agent pauses. Secrets are redacted, nothing is kept after the broadcast ends, and watchers cannot send anything to your session. Provider tokens are now redacted even when glued to other text. Requires a Takonaut server with live watch, and a Project administrator must turn on **Allow live watch**.
 
