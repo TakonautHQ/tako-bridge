@@ -33,6 +33,7 @@ import {
 	type GitHubRepositoryContext,
 	type StartableTask,
 } from "./client";
+import { availableModelKeys, type ModelRegistryLike } from "./planning-models";
 import { TakonautToolCatalog } from "./catalog";
 import { ContextBudget } from "./project-context-budget";
 import { containsSensitiveValue, redactSensitiveValues } from "./redaction";
@@ -287,6 +288,13 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	// planning turns (which run in the background, outside any command's
 	// ExtensionContext) to reuse rather than guess a default (DJ-089 follow-up).
 	let lastKnownModel: { provider: string; id: string } | null = null;
+	// Pi's model registry, captured from the first event that carries an
+	// ExtensionContext, so each heartbeat can report the models this Pi can
+	// run (Grill v2: a Grill hosted on this Pi picks one of them).
+	let modelRegistry: ModelRegistryLike | null = null;
+	const rememberRegistry = (ctx: ExtensionContext | undefined) => {
+		if (ctx?.modelRegistry) modelRegistry = ctx.modelRegistry;
+	};
 	const rememberModel = (model: { provider: string; id: string } | undefined) => {
 		if (model) lastKnownModel = { provider: model.provider, id: model.id };
 	};
@@ -297,6 +305,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	pi.on("agent_end", () => agentMetrics.onAgentIdle());
 	pi.on("turn_end", (event: { message?: unknown }, ctx: ExtensionContext) => {
 		agentMetrics.onTurnEnd(event?.message);
+		rememberRegistry(ctx);
 		rememberModel(ctx.model as { provider: string; id: string } | undefined);
 	});
 	pi.on(
@@ -384,6 +393,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 			}
 		},
 		planningCapable: () => true,
+		availableModels: () => availableModelKeys(modelRegistry),
 	});
 	let workLinkMode: WorkLinkMode = "nudge";
 	const updates = new BridgeUpdates();
@@ -3894,6 +3904,7 @@ export default function takonautExtension(pi: ExtensionAPI): void {
 	);
 
 	pi.on("session_start", async (_event, ctx) => {
+		rememberRegistry(ctx);
 		rememberModel(ctx.model as { provider: string; id: string } | undefined);
 		reporter.reset();
 		if (ctx.hasUI) updates.start(() => renderUpdateIndicator(ctx));

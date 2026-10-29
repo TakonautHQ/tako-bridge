@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync, utimesSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { CommandRunner } from "./git";
@@ -14,6 +14,11 @@ export interface PlanningTurnOffer {
 	repository_id: string;
 	sha: string;
 	claim_token: string;
+	/** Grill v2: this turn continues a hosted Grill's one Planner session on this Pi. */
+	hosted?: boolean;
+	model?: string | null;
+	session_generation?: number | null;
+	asker?: { id: string; name: string };
 }
 
 /** The ADRs in force, frozen at this turn's enqueue time (B14, mirrors tako-runner's AdrSnapshot). */
@@ -36,6 +41,25 @@ export interface PlanningTurnClaim {
 	/** The Planner's exactly granted Takonaut MCP tool names (server-resolved). */
 	granted_tools: string[];
 	adr_snapshot: PlanningTurnAdrSnapshot | null;
+	/** Grill v2: a hosted Grill's turn (any member may have asked). */
+	hosted?: boolean;
+	model?: string | null;
+	brief_model?: string | null;
+	session_generation?: number | null;
+	asker?: { id: string; name: string };
+	/** The per-turn credential a hosted turn's tools must use instead of this Pi's own key. */
+	delegate_token?: string | null;
+	/** The Grill so far (Decisions, recent conversation) for the system prompt. */
+	rebuild_context?: string | null;
+	/** The Project's Grill prompt, locked for this Grill. */
+	grill_prompt?: string | null;
+	/** What the member tagged this message as (answer, clarify, follow-up, challenge). */
+	message_tag?: { tag: string; question?: string | null } | null;
+	/**
+	 * Grill v2 Phase 2: a read-only side branch. `fork`: continue a fork of the
+	 * main session (it runs on the Grill's host); otherwise start from the Grill so far.
+	 */
+	branch?: { id: string; title: string; fork: boolean } | null;
 }
 
 export interface PlanningTurnsApi {
@@ -83,6 +107,25 @@ export interface PlanningTurnExecutor {
 		onDraft: (text: string) => void;
 		/** Aborted when the lease renewal loop (N1) learns the claim binding is no longer active. */
 		signal?: AbortSignal;
+		/**
+		 * Grill v2, hosted: continue this Pi session instead of starting a throwaway one;
+		 * with `forkFrom`, first copy that (main) session into it (a branch's first turn).
+		 */
+		session?: { dir: string; id: string; forkFrom?: string };
+		/** Grill v2, hosted: the Grill's chosen model (`provider/id`). */
+		model?: string;
+		/** Grill v2, hosted: the per-turn delegate the Planner's tools must use. */
+		delegateToken?: string;
+		/** Grill v2, hosted: who asked this turn. */
+		asker?: { name: string };
+		/** Grill v2, hosted: the Grill so far, for the Planner's system prompt. */
+		rebuildContext?: string;
+		/** Grill v2, hosted: the Project's Grill prompt (how to interview this team). */
+		grillPrompt?: string;
+		/** Grill v2, hosted: what the member tagged this message as. */
+		messageTag?: { tag: string; question?: string | null };
+		/** Grill v2 Phase 2: this turn is on a side branch with this title. */
+		branchTitle?: string;
 	}): Promise<{ outputMarkdown: string }>;
 }
 
@@ -193,6 +236,96 @@ export async function cleanupPlanningTurnWorktree(
 	}
 }
 
+// Grill v2: a hosted Grill keeps its worktree and Pi session here between
+// turns. The worktree path stays the same for the Grill's life, because Pi
+// finds a session by its id *and* working directory.
+const HOSTED_IDLE_MS = 24 * 60 * 60_000;
+const SAFE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function defaultHostedPlanningRoot(): string {
+	return process.env.TAKONAUT_PI_PLANNING_DIR ?? join(homedir(), ".takonaut", "pi-planning");
+}
+
+/** Whether a Pi session with this exact id is in this folder (files are `<timestamp>_<id>.jsonl`). */
+function hasSession(dir: string, id: string): boolean {
+	try {
+		return readdirSync(dir).some((name) => name.endsWith(`_${id}.jsonl`));
+	} catch {
+		return false;
+	}
+}
+
+/** Remove hosted Grill folders nobody has used for a day (their sessions and worktrees). */
+export function pruneHostedPlanning(root: string, keep: string, now = Date.now()): number {
+	if (!existsSync(root)) return 0;
+	let removed = 0;
+	for (const name of readdirSync(root)) {
+		if (name === keep) continue;
+		const dir = join(root, name);
+		try {
+			if (now - statSync(dir).mtimeMs > HOSTED_IDLE_MS) {
+				rmSync(dir, { recursive: true, force: true });
+				removed += 1;
+			}
+		} catch {
+			// Raced with another prune.
+		}
+	}
+	return removed;
+}
+
+/** The Grill's kept worktree at `sha`: reused, re-checked-out, or created. */
+export async function ensureHostedWorktree(
+	run: CommandRunner,
+	repoRoot: string,
+	root: string,
+	sha: string,
+): Promise<PlanningTurnWorktree> {
+	if (!SHA_RE.test(sha)) {
+		throw new Error("Planning turn SHA is invalid");
+	}
+	if (existsSync(root)) {
+		const head = await run("git", ["-C", root, "rev-parse", "HEAD"]);
+		if (head.exitCode === 0 && head.stdout.trim() === sha) {
+			return { root, repoRoot, sha };
+		}
+		if (head.exitCode === 0) {
+			const moved = await run("git", [
+				"-C",
+				root,
+				"-c",
+				"core.symlinks=false",
+				"checkout",
+				"--detach",
+				"--force",
+				sha,
+			]);
+			if (moved.exitCode === 0) return { root, repoRoot, sha };
+		}
+		// Not a usable worktree any more: start it again at the same path.
+		await run("git", ["-C", repoRoot, "worktree", "remove", "--force", "--", root]);
+		rmSync(root, { recursive: true, force: true });
+		await run("git", ["-C", repoRoot, "worktree", "prune"]);
+	}
+	const result = await run("git", [
+		"-C",
+		repoRoot,
+		"-c",
+		"core.symlinks=false",
+		"worktree",
+		"add",
+		"--detach",
+		root,
+		sha,
+	]);
+	if (result.exitCode !== 0) {
+		throw new Error(
+			`Planning turn worktree creation failed: ${(result.stderr || result.stdout).trim()}`,
+		);
+	}
+	return { root, repoRoot, sha };
+}
+
 export type PlanningTurnOutcome =
 	| { kind: "deferred" }
 	| { kind: "declined"; reason: string }
@@ -213,6 +346,8 @@ export interface PlanningTurnControllerOptions {
 	isIdle: () => boolean;
 	/** The user's local toggle for running planning turns at all (default: always on). */
 	planningEnabled?: () => boolean;
+	/** Where hosted Grills keep their worktree and Pi session (default ~/.takonaut/pi-planning). */
+	hostedRoot?: string;
 	onEvent?: (event: string, detail?: Record<string, unknown>) => void;
 }
 
@@ -281,6 +416,61 @@ export class PlanningTurnController {
 		}
 	}
 
+	private hostedRoot(): string {
+		return this.options.hostedRoot ?? defaultHostedPlanningRoot();
+	}
+
+	/**
+	 * Grill v2: the hosted Grill's session folder, after pruning idle ones.
+	 * Throws (failing the turn) rather than ever running a teammate's turn
+	 * with this Pi's own key when the server issued no delegate.
+	 */
+	private prepareHosted(
+		offer: PlanningTurnOffer,
+		claim: PlanningTurnClaim,
+	): Pick<
+		Parameters<PlanningTurnExecutor["run"]>[0],
+		"session" | "model" | "delegateToken" | "asker" | "rebuildContext" | "grillPrompt" | "messageTag" | "branchTitle"
+	> {
+		if (!claim.delegate_token) {
+			throw new Error("The server issued no delegate for this hosted Grill turn; refusing to run it");
+		}
+		if (!SAFE_UUID.test(offer.session_id)) {
+			throw new Error("Invalid Grill session id");
+		}
+		const root = this.hostedRoot();
+		pruneHostedPlanning(root, offer.session_id);
+		const grillDir = join(root, offer.session_id);
+		const sessionsDir = join(grillDir, "sessions");
+		mkdirSync(sessionsDir, { recursive: true, mode: 0o700 });
+		const now = new Date();
+		utimesSync(grillDir, now, now);
+		const generation = Number.isInteger(claim.session_generation) ? claim.session_generation : 0;
+		const mainId = `grill-${offer.session_id}-g${generation}`;
+		let session: { dir: string; id: string; forkFrom?: string } = { dir: sessionsDir, id: mainId };
+		if (claim.branch) {
+			// Grill v2 Phase 2: a side branch keeps its own session. Its first turn
+			// forks the main session (when it has one) so the Planner has the
+			// whole Grill without the branch ever entering the main session.
+			if (!SAFE_UUID.test(claim.branch.id)) {
+				throw new Error("Invalid Grill branch id");
+			}
+			const branchId = `${mainId}-b-${claim.branch.id}`;
+			const fork = claim.branch.fork && !hasSession(sessionsDir, branchId) && hasSession(sessionsDir, mainId);
+			session = fork ? { dir: sessionsDir, id: branchId, forkFrom: mainId } : { dir: sessionsDir, id: branchId };
+		}
+		return {
+			session,
+			branchTitle: claim.branch?.title,
+			model: claim.model ?? undefined,
+			delegateToken: claim.delegate_token,
+			asker: claim.asker ? { name: claim.asker.name } : undefined,
+			rebuildContext: claim.rebuild_context ?? undefined,
+			grillPrompt: claim.grill_prompt ?? undefined,
+			messageTag: claim.message_tag ?? undefined,
+		};
+	}
+
 	private async runClaimed(
 		offer: PlanningTurnOffer,
 		repoRoot: string,
@@ -321,19 +511,35 @@ export class PlanningTurnController {
 					// Any other failure is a transient blip: left running, retried next tick.
 				});
 		}, PLANNING_TURN_RENEW_INTERVAL_MS);
+		const hosted = claim.hosted === true;
 		try {
-			worktree = await createPlanningTurnWorktree(
-				run,
-				repoRoot,
-				offer.turn_id,
-				offer.sha,
-			);
+			let hostedInput: Pick<
+				Parameters<PlanningTurnExecutor["run"]>[0],
+				"session" | "model" | "delegateToken" | "asker" | "rebuildContext" | "grillPrompt" | "messageTag"
+			> = {};
+			if (hosted) {
+				hostedInput = this.prepareHosted(offer, claim);
+				worktree = await ensureHostedWorktree(
+					run,
+					repoRoot,
+					join(this.hostedRoot(), offer.session_id, "worktree"),
+					offer.sha,
+				);
+			} else {
+				worktree = await createPlanningTurnWorktree(
+					run,
+					repoRoot,
+					offer.turn_id,
+					offer.sha,
+				);
+			}
 			const { outputMarkdown } = await executor.run({
 				worktreeRoot: worktree.root,
 				instruction: offer.instruction,
 				grantedTools: claim.granted_tools,
 				adrSnapshot: claim.adr_snapshot,
 				signal: abortController.signal,
+				...hostedInput,
 				onDraft: (text) => {
 					api
 						.streamPlanningTurnDraft({
@@ -382,7 +588,8 @@ export class PlanningTurnController {
 			return { kind: "completed", ok: false };
 		} finally {
 			if (renewTimer) clearInterval(renewTimer);
-			if (worktree) {
+			// A hosted Grill keeps its worktree for the next turn (pruned when idle).
+			if (worktree && !hosted) {
 				await cleanupPlanningTurnWorktree(run, worktree).catch((error) =>
 					this.options.onEvent?.("planning_turn_cleanup_failed", {
 						turnId: offer.turn_id,

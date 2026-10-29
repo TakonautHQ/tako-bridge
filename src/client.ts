@@ -394,7 +394,10 @@ export class TakonautClient {
 	private connectPromise: Promise<void> | undefined;
 
 	constructor(
-		private cfg: Pick<TakonautConfig, "serverUrl" | "apiKey" | "orgId">,
+		private cfg: Pick<TakonautConfig, "serverUrl" | "apiKey" | "orgId"> & {
+			/** Grill v2: a hosted Grill turn's per-turn delegate, sent instead of the device key. */
+			delegateToken?: string;
+		},
 	) {
 		this.client = new Client(
 			{ name: "tako-bridge", version: BRIDGE_VERSION },
@@ -413,10 +416,15 @@ export class TakonautClient {
 				const transport = new StreamableHTTPClientTransport(endpoint, {
 					requestInit: {
 						redirect: "error",
-						headers: {
-							"X-API-Key": this.cfg.apiKey,
-							"X-Organization-Id": this.cfg.orgId,
-						},
+						headers: this.cfg.delegateToken
+							? {
+									"X-Takonaut-Planning-Delegate": this.cfg.delegateToken,
+									"X-Organization-Id": this.cfg.orgId,
+								}
+							: {
+									"X-API-Key": this.cfg.apiKey,
+									"X-Organization-Id": this.cfg.orgId,
+								},
 					},
 				});
 				await this.client.connect(transport);
@@ -536,10 +544,19 @@ export class TakonautClient {
 	heartbeatWorkSession(
 		piSessionId: string,
 		planningCapable = true,
+		availableModels?: string[],
 	): Promise<unknown> {
 		return this.call(
 			"heartbeat_bridge_work_session",
-			{ pi_session_id: piSessionId, planning_capable: planningCapable },
+			{
+				pi_session_id: piSessionId,
+				planning_capable: planningCapable,
+				// Grill v2: this Bridge runs hosted Grill turns through the
+				// per-turn delegate, never its own key, so it may be offered them.
+				grill_hosting: true,
+				// Only when known: an omitted list keeps the server's last report.
+				...(availableModels ? { available_models: availableModels } : {}),
+			},
 			10_000,
 		);
 	}

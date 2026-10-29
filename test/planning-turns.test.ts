@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -682,5 +682,235 @@ describe("PlanningTurnController lease renewal (N1)", () => {
 		const countAfterAbort = api.renewed.length;
 		await vi.advanceTimersByTimeAsync(60_000);
 		expect(api.renewed).toHaveLength(countAfterAbort);
+	});
+});
+
+describe("hosted Grill turns (Grill v2)", () => {
+	let root: string;
+	let repoRoot: string;
+	let hostedRoot: string;
+	let sha: string;
+
+	function hostedApi(
+		overrides: Partial<{
+			delegate_token: string | null;
+			session_generation: number;
+			branch: { id: string; title: string; fork: boolean } | null;
+		}> = {},
+	) {
+		const api = fakeApi();
+		api.claimPlanningTurn = vi.fn(async (input) => {
+			api.claimed.push(input);
+			return {
+				run_id: input.turnId,
+				status: "running",
+				granted_tools: ["get_task"],
+				adr_snapshot: null,
+				hosted: true,
+				model: "anthropic/claude-opus-5-5",
+				brief_model: null,
+				session_generation: overrides.session_generation ?? 1,
+				asker: { id: "66666666-6666-6666-6666-666666666666", name: "Ravi" },
+				delegate_token: "delegate_token" in overrides ? overrides.delegate_token : "delegate-xyz",
+				rebuild_context: "## Decisions so far\n- Who can refund? → Ops only",
+				grill_prompt: "Interview the team in rounds.",
+				branch: overrides.branch ?? null,
+			};
+		});
+		return api;
+	}
+
+	function controllerFor(api: PlanningTurnsApi, executor: PlanningTurnExecutor) {
+		return new PlanningTurnController({
+			api,
+			run,
+			executor,
+			repoRoot: async () => repoRoot,
+			isIdle: () => true,
+			hostedRoot,
+		});
+	}
+
+	beforeEach(async () => {
+		root = mkdtempSync(join(tmpdir(), "tako-planning-hosted-"));
+		repoRoot = join(root, "source");
+		hostedRoot = join(root, "pi-planning");
+		mkdirSync(repoRoot, { recursive: true });
+		await git(repoRoot, "init");
+		await git(repoRoot, "config", "user.email", "test@takonaut.test");
+		await git(repoRoot, "config", "user.name", "Takonaut Test");
+		writeFileSync(join(repoRoot, "README.md"), "safe\n");
+		await git(repoRoot, "add", "README.md");
+		await git(repoRoot, "commit", "-m", "initial");
+		sha = await git(repoRoot, "rev-parse", "HEAD");
+	});
+
+	afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+	it("continues the Grill's one session in a kept worktree, with the Grill model and the delegate", async () => {
+		const api = hostedApi();
+		const seen: Parameters<PlanningTurnExecutor["run"]>[0][] = [];
+		const executor: PlanningTurnExecutor = {
+			run: vi.fn(async (input) => {
+				seen.push(input);
+				return { outputMarkdown: "ok" };
+			}),
+		};
+		const controller = controllerFor(api, executor);
+		const grillDir = join(hostedRoot, offer().session_id);
+
+		await controller.handleOffers([offer({ sha, hosted: true })]);
+		await controller.handleOffers([offer({ sha, hosted: true, turn_id: "77777777-7777-7777-7777-777777777777" })]);
+
+		expect(seen).toHaveLength(2);
+		for (const input of seen) {
+			expect(input.worktreeRoot).toBe(join(grillDir, "worktree"));
+			expect(input.session).toEqual({
+				dir: join(grillDir, "sessions"),
+				id: `grill-${offer().session_id}-g1`,
+			});
+			expect(input.model).toBe("anthropic/claude-opus-5-5");
+			expect(input.delegateToken).toBe("delegate-xyz");
+			expect(input.asker).toEqual({ name: "Ravi" });
+			expect(input.rebuildContext).toContain("Who can refund? → Ops only");
+			expect(input.grillPrompt).toBe("Interview the team in rounds.");
+		}
+		// Kept between turns: the session's cwd must stay the same.
+		expect(await git(join(grillDir, "worktree"), "rev-parse", "HEAD")).toBe(sha);
+		expect(api.completed.map((c) => (c as { ok: boolean }).ok)).toEqual([true, true]);
+	});
+
+	const BRANCH = { id: "99999999-9999-9999-9999-999999999999", title: "Stripe fees", fork: true };
+
+	function sessionFile(id: string) {
+		const dir = join(hostedRoot, offer().session_id, "sessions");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, `2026-10-29T10-00-00-000Z_${id}.jsonl`), "{}\n");
+	}
+
+	it("forks a branch off the main session the first time (Grill v2 Phase 2)", async () => {
+		const executor: PlanningTurnExecutor = { run: vi.fn(async () => ({ outputMarkdown: "ok" })) };
+		const main = `grill-${offer().session_id}-g1`;
+		sessionFile(main);
+
+		await controllerFor(hostedApi({ branch: BRANCH }), executor).handleOffers([offer({ sha, hosted: true })]);
+
+		const input = vi.mocked(executor.run).mock.calls[0][0];
+		expect(input.session).toEqual({
+			dir: join(hostedRoot, offer().session_id, "sessions"),
+			id: `${main}-b-${BRANCH.id}`,
+			forkFrom: main,
+		});
+		expect(input.branchTitle).toBe("Stripe fees");
+	});
+
+	it("continues a branch's own session once it exists", async () => {
+		const executor: PlanningTurnExecutor = { run: vi.fn(async () => ({ outputMarkdown: "ok" })) };
+		const main = `grill-${offer().session_id}-g1`;
+		sessionFile(main);
+		sessionFile(`${main}-b-${BRANCH.id}`);
+
+		await controllerFor(hostedApi({ branch: BRANCH }), executor).handleOffers([offer({ sha, hosted: true })]);
+
+		expect(vi.mocked(executor.run).mock.calls[0][0].session).toEqual({
+			dir: join(hostedRoot, offer().session_id, "sessions"),
+			id: `${main}-b-${BRANCH.id}`,
+		});
+	});
+
+	it("starts a branch fresh (from the Grill so far) without a main session or on another host", async () => {
+		const executor: PlanningTurnExecutor = { run: vi.fn(async () => ({ outputMarkdown: "ok" })) };
+
+		await controllerFor(hostedApi({ branch: BRANCH }), executor).handleOffers([offer({ sha, hosted: true })]);
+		sessionFile(`grill-${offer().session_id}-g1`);
+		await controllerFor(hostedApi({ branch: { ...BRANCH, id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", fork: false } }), executor).handleOffers([
+			offer({ sha, hosted: true, turn_id: "77777777-7777-7777-7777-777777777777" }),
+		]);
+
+		for (const call of vi.mocked(executor.run).mock.calls) {
+			expect(call[0].session?.forkFrom).toBeUndefined();
+			expect(call[0].rebuildContext).toContain("Who can refund?");
+		}
+	});
+
+	it("refuses a branch with an unsafe id", async () => {
+		const executor: PlanningTurnExecutor = { run: vi.fn(async () => ({ outputMarkdown: "ok" })) };
+		const api = hostedApi({ branch: { ...BRANCH, id: "../../etc" } });
+
+		await controllerFor(api, executor).handleOffers([offer({ sha, hosted: true })]);
+
+		expect(executor.run).not.toHaveBeenCalled();
+		expect(api.completed.map((c) => (c as { ok: boolean }).ok)).toEqual([false]);
+	});
+
+	it("starts a new session when the generation changes", async () => {
+		const executor: PlanningTurnExecutor = { run: vi.fn(async () => ({ outputMarkdown: "ok" })) };
+
+		await controllerFor(hostedApi({ session_generation: 2 }), executor).handleOffers([
+			offer({ sha, hosted: true }),
+		]);
+
+		expect(vi.mocked(executor.run).mock.calls[0][0].session?.id).toBe(`grill-${offer().session_id}-g2`);
+	});
+
+	it("re-checks out the kept worktree when the Grill is re-pinned to another commit", async () => {
+		const executor: PlanningTurnExecutor = { run: vi.fn(async () => ({ outputMarkdown: "ok" })) };
+		const controller = controllerFor(hostedApi(), executor);
+		await controller.handleOffers([offer({ sha, hosted: true })]);
+
+		writeFileSync(join(repoRoot, "NEW.md"), "new\n");
+		await git(repoRoot, "add", "NEW.md");
+		await git(repoRoot, "commit", "-m", "second");
+		const newSha = await git(repoRoot, "rev-parse", "HEAD");
+		await controller.handleOffers([offer({ sha: newSha, hosted: true, turn_id: "88888888-8888-8888-8888-888888888888" })]);
+
+		const worktree = join(hostedRoot, offer().session_id, "worktree");
+		expect(await git(worktree, "rev-parse", "HEAD")).toBe(newSha);
+		expect(existsSync(join(worktree, "NEW.md"))).toBe(true);
+	});
+
+	it("refuses to run a hosted turn without a delegate, never falling back to its own key", async () => {
+		const api = hostedApi({ delegate_token: null });
+		const executor: PlanningTurnExecutor = { run: vi.fn(async () => ({ outputMarkdown: "ok" })) };
+
+		const outcome = await controllerFor(api, executor).handleOffers([offer({ sha, hosted: true })]);
+
+		expect(outcome).toEqual({ kind: "completed", ok: false });
+		expect(executor.run).not.toHaveBeenCalled();
+		expect(api.completed).toEqual([
+			expect.objectContaining({ ok: false, error: expect.stringContaining("delegate") }),
+		]);
+	});
+
+	it("prunes Grill folders idle for longer than a day", async () => {
+		const stale = join(hostedRoot, "99999999-9999-9999-9999-999999999999");
+		mkdirSync(join(stale, "sessions"), { recursive: true });
+		const old = (Date.now() - 2 * 24 * 60 * 60_000) / 1000;
+		utimesSync(stale, old, old);
+		const executor: PlanningTurnExecutor = { run: vi.fn(async () => ({ outputMarkdown: "ok" })) };
+
+		await controllerFor(hostedApi(), executor).handleOffers([offer({ sha, hosted: true })]);
+
+		expect(existsSync(stale)).toBe(false);
+		expect(existsSync(join(hostedRoot, offer().session_id))).toBe(true);
+	});
+
+	it("keeps the temporary per-turn worktree for Grills without a host", async () => {
+		const api = fakeApi();
+		const seen: Parameters<PlanningTurnExecutor["run"]>[0][] = [];
+		const executor: PlanningTurnExecutor = {
+			run: vi.fn(async (input) => {
+				seen.push(input);
+				return { outputMarkdown: "ok" };
+			}),
+		};
+
+		await controllerFor(api, executor).handleOffers([offer({ sha })]);
+
+		expect(seen[0].session).toBeUndefined();
+		expect(seen[0].delegateToken).toBeUndefined();
+		expect(seen[0].worktreeRoot.startsWith(tmpdir())).toBe(true);
+		expect(existsSync(seen[0].worktreeRoot)).toBe(false);
+		expect(existsSync(hostedRoot)).toBe(false);
 	});
 });

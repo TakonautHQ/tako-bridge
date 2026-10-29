@@ -1,6 +1,6 @@
 # Tako Bridge
 
-**Current release: [v0.7.1](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.7.1).**
+**Current release: [v0.8.0](https://github.com/TakonautHQ/tako-bridge/releases/tag/v0.8.0).**
 
 Tako Bridge is Takonaut's open-source developer workflow extension for the [Pi agent harness](https://github.com/earendil-works/pi). It brings assigned Takonaut work, governed Project Context, repository verification, durable recovery, tests, human-reviewed completion evidence, and Tako Grill Work hierarchy planning into a local Pi session.
 
@@ -24,7 +24,7 @@ Install a pinned Git tag from the project you are working in. Project-local inst
 
 ```bash
 cd /path/to/your/project
-pi install git:github.com/TakonautHQ/tako-bridge@v0.7.1 -l
+pi install git:github.com/TakonautHQ/tako-bridge@v0.8.0 -l
 ```
 
 To upgrade an existing project-local installation, run the pinned install command above, then restart Pi or run `/reload` in the existing Pi session. Version-pinned Git installs do not automatically advance to newer release tags.
@@ -36,6 +36,8 @@ To try the update and reporting flows after installing or upgrading, run in Pi:
 /tako-update
 /tako-report
 ```
+
+**New in v0.8.0:** host a Grill. A Grill hosted on your Pi keeps one continuous Planner session (and one worktree) for the whole Grill, runs on the model chosen for it, and runs teammates' messages with a per-turn delegate that acts as the teammate, in shared-data-only mode, never with your own key. Side branches fork the Grill's session into their own (`--fork`) and get no write tools. The heartbeat reports the models this Pi can run and that it can host; the Planner gets the project's Grill prompt and "the Grill so far" in its system prompt.
 
 **New in v0.7.1:** dependency security updates. Overrides move undici to 8.12.2, qs to 6.16.1, body-parser to 2.4.0, zod to 4.6.6, ip-address to 10.7.4 and fast-uri to 3.1.9 (runtime, via the MCP SDK), and Vitest to 4.1.12 (dev); `bun audit` is clean. Includes everything in v0.7.0.
 

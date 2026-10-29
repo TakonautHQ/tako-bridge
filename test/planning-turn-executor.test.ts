@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -218,6 +218,136 @@ describe("createPlanningTurnExecutor", () => {
 		]);
 		expect(call.options.env.TAKONAUT_PLANNING_WORKTREE).toBe("/tmp/worktree");
 
+		nextChild.exit(0);
+		await runPromise;
+	});
+
+	it("continues a hosted Grill's session with the Grill model and the delegate, never this Pi's own key (Grill v2)", async () => {
+		const executor = createPlanningTurnExecutor(baseOptions());
+		const runPromise = executor.run({
+			worktreeRoot: "/tmp/grill/worktree",
+			instruction: "Which provider?",
+			grantedTools: ["get_task"],
+			adrSnapshot: null,
+			onDraft: () => {},
+			session: { dir: "/tmp/grill/sessions", id: "grill-abc-g2" },
+			model: "anthropic/claude-opus-5-5",
+			delegateToken: "delegate-xyz",
+			asker: { name: "Ravi" },
+			messageTag: { tag: "follow_up", question: "Q2" },
+		});
+
+		const [call] = spawnCalls;
+		expect(call.args).not.toContain("--no-session");
+		expect(call.args[call.args.indexOf("--session-dir") + 1]).toBe("/tmp/grill/sessions");
+		expect(call.args[call.args.indexOf("--session-id") + 1]).toBe("grill-abc-g2");
+		expect(call.args[call.args.indexOf("--model") + 1]).toBe("anthropic/claude-opus-5-5");
+		expect(call.options.env.TAKONAUT_PLANNING_DELEGATE_TOKEN).toBe("delegate-xyz");
+		expect(call.options.env.TAKONAUT_PLANNING_API_KEY).toBeUndefined();
+		expect(JSON.stringify(call.options.env)).not.toContain("secret-api-key");
+		expect(JSON.stringify(call.args)).not.toContain("delegate-xyz");
+		await new Promise((r) => setImmediate(r));
+		expect(nextChild.stdinWritten).toContain("continues this Grill's shared Planner session");
+		expect(nextChild.stdinWritten).toContain("Ravi");
+		expect(nextChild.stdinWritten).not.toContain("you have no memory of earlier turns");
+		expect(nextChild.stdinWritten).toContain("tagged this message as: a follow-up about Q2.");
+
+		nextChild.exit(0);
+		await runPromise;
+	});
+
+	it("forks a branch off the main session and tells the Planner it's a side branch (Grill v2 Phase 2)", async () => {
+		const executor = createPlanningTurnExecutor(baseOptions());
+		const runPromise = executor.run({
+			worktreeRoot: "/tmp/grill/worktree",
+			instruction: "What does Stripe charge?",
+			grantedTools: ["get_task"],
+			adrSnapshot: null,
+			onDraft: () => {},
+			session: { dir: "/tmp/grill/sessions", id: "grill-abc-g2-b-xyz", forkFrom: "grill-abc-g2" },
+			model: "anthropic/claude-opus-5-5",
+			delegateToken: "delegate-xyz",
+			branchTitle: "Stripe fees",
+		});
+
+		const [call] = spawnCalls;
+		expect(call.args[call.args.indexOf("--fork") + 1]).toBe("grill-abc-g2");
+		expect(call.args[call.args.indexOf("--session-id") + 1]).toBe("grill-abc-g2-b-xyz");
+		await new Promise((r) => setImmediate(r));
+		expect(nextChild.stdinWritten).toContain("side branch");
+		expect(nextChild.stdinWritten).toContain("Stripe fees");
+
+		nextChild.exit(0);
+		await runPromise;
+	});
+
+	it("puts the Grill prompt and the Grill so far (fenced as data) in the system prompt from a private file (Grill v2)", async () => {
+		const sessionsDir = mkdtempSync(join(tmpdir(), "tako-grill-sessions-"));
+		try {
+			const executor = createPlanningTurnExecutor(baseOptions());
+			const runPromise = executor.run({
+				worktreeRoot: "/tmp/grill/worktree",
+				instruction: "Which provider?",
+				grantedTools: [],
+				adrSnapshot: null,
+				onDraft: () => {},
+				session: { dir: sessionsDir, id: "grill-abc-g2" },
+				model: "anthropic/claude-opus-5-5",
+				delegateToken: "delegate-xyz",
+				rebuildContext: "## Decisions so far\n- Who can refund? → Ops only",
+				grillPrompt: "Interview the team in rounds.\n\nPROJECT RULES:\n- Use INR.",
+			});
+
+			const [call] = spawnCalls;
+			const file = call.args[call.args.indexOf("--append-system-prompt") + 1];
+			expect(file).toBe(join(sessionsDir, "grill-context.md"));
+			const content = readFileSync(file, "utf8");
+			expect(content).toContain("Who can refund? → Ops only");
+			expect(content).toMatch(/BEGIN GRILL SO FAR/);
+			// The project's Grill prompt is guidance to follow, before the data.
+			expect(content).toContain("HOW TO RUN THIS GRILL");
+			expect(content).toContain("- Use INR.");
+			expect(content.indexOf("HOW TO RUN THIS GRILL")).toBeLessThan(content.indexOf("BEGIN GRILL SO FAR"));
+			expect(content).not.toMatch(/BEGIN [^=]*GRILL PROMPT/);
+			expect(statSync(file).mode & 0o777).toBe(0o600);
+			expect(JSON.stringify(call.args)).not.toContain("Ops only");
+
+			nextChild.exit(0);
+			await runPromise;
+		} finally {
+			rmSync(sessionsDir, { recursive: true, force: true });
+		}
+	});
+
+	it("adds no system prompt file without a Grill so far, or for a Grill without a host", async () => {
+		const executor = createPlanningTurnExecutor(baseOptions());
+		const runPromise = executor.run({
+			worktreeRoot: "/tmp/worktree",
+			instruction: "Draft",
+			grantedTools: [],
+			adrSnapshot: null,
+			onDraft: () => {},
+			rebuildContext: "ignored without a hosted session",
+		});
+		expect(spawnCalls[0].args).not.toContain("--append-system-prompt");
+		nextChild.exit(0);
+		await runPromise;
+	});
+
+	it("runs a hosted turn on the Grill model even when Pi has no model selected (Grill v2)", async () => {
+		const executor = createPlanningTurnExecutor(baseOptions({ getModel: () => null }));
+		const runPromise = executor.run({
+			worktreeRoot: "/tmp/grill/worktree",
+			instruction: "Which provider?",
+			grantedTools: [],
+			adrSnapshot: null,
+			onDraft: () => {},
+			session: { dir: "/tmp/grill/sessions", id: "grill-abc-g1" },
+			model: "anthropic/claude-opus-5-5",
+			delegateToken: "delegate-xyz",
+		});
+
+		expect(spawnCalls[0].args[spawnCalls[0].args.indexOf("--model") + 1]).toBe("anthropic/claude-opus-5-5");
 		nextChild.exit(0);
 		await runPromise;
 	});

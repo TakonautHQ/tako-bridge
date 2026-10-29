@@ -94,6 +94,21 @@ describe("TakonautClient transport", () => {
 		expect(args[1]).toMatchObject({ task_key: "TP-2", column_name: "Review" });
 	});
 
+	it("reports available models on the heartbeat only when it knows them", async () => {
+		const client = new TakonautClient(cfg);
+		await client.heartbeatWorkSession("pi-1", true);
+		await client.heartbeatWorkSession("pi-1", true, ["anthropic/claude-opus-5-5"]);
+		const args = mocks.callTool.mock.calls.map(([call]) => call.arguments);
+		// This Bridge runs hosted Grill turns through the per-turn delegate.
+		expect(args[0]).toEqual({ pi_session_id: "pi-1", planning_capable: true, grill_hosting: true });
+		expect(args[1]).toEqual({
+			pi_session_id: "pi-1",
+			planning_capable: true,
+			grill_hosting: true,
+			available_models: ["anthropic/claude-opus-5-5"],
+		});
+	});
+
 	it("calls a discovered MCP tool generically and enforces the argument bound", async () => {
 		mocks.callTool.mockResolvedValue({
 			content: [{ type: "text", text: JSON.stringify({ tasks: ["PAY-1"] }) }],
@@ -194,6 +209,17 @@ describe("TakonautClient transport", () => {
 			"X-Organization-Id": "org-123",
 		});
 		expect(mocks.connect).toHaveBeenCalledOnce();
+	});
+
+	it("authenticates a hosted Grill turn with its delegate, never a device key (Grill v2)", async () => {
+		const client = new TakonautClient({ ...cfg, apiKey: "", delegateToken: "delegate-xyz" });
+		await client.listStartableTasks();
+
+		const [, options] = mocks.streamableTransport.mock.calls[0] as [URL, any];
+		expect(options.requestInit.headers).toEqual({
+			"X-Takonaut-Planning-Delegate": "delegate-xyz",
+			"X-Organization-Id": "org-123",
+		});
 	});
 
 	it("passes bounded transport timeouts for synchronization calls", async () => {

@@ -154,6 +154,19 @@ describe("WorkLinkController", () => {
 		await link.end(a, "s", "unlinked");
 	});
 
+	it("reports the models Pi can run on each heartbeat when known", async () => {
+		vi.useFakeTimers();
+		const a = api();
+		const link = new WorkLinkController({
+			intervalMs: 1_000,
+			availableModels: () => ["anthropic/claude-opus-5-5"],
+		});
+		await link.link(a, { piSessionId: "s", taskKey: "CP-1", linkSource: "command" });
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(a.heartbeatWorkSession).toHaveBeenCalledWith("s", true, ["anthropic/claude-opus-5-5"]);
+		await link.end(a, "s", "unlinked");
+	});
+
 	it("hands each heartbeat's response on, with its session", async () => {
 		vi.useFakeTimers();
 		const a = {

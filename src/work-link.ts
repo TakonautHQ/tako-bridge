@@ -40,7 +40,11 @@ export interface WorkLinkApi {
 		/** The Stage picked from a previous link's `move_choices`. */
 		columnName?: string;
 	}): Promise<WorkLinkResult>;
-	heartbeatWorkSession(piSessionId: string, planningCapable?: boolean): Promise<unknown>;
+	heartbeatWorkSession(
+		piSessionId: string,
+		planningCapable?: boolean,
+		availableModels?: string[],
+	): Promise<unknown>;
 	endWorkSession(piSessionId: string, reason: "unlinked" | "shutdown"): Promise<unknown>;
 }
 
@@ -250,6 +254,8 @@ export class WorkLinkController {
 			onHeartbeat?: (result: unknown, piSessionId: string) => void;
 			/** Whether this Pi build can run an offered planning turn (default: true). */
 			planningCapable?: () => boolean;
+			/** The `provider/id` models this Pi can run; undefined while unknown. */
+			availableModels?: () => string[] | undefined;
 		} = {},
 	) {}
 
@@ -300,8 +306,12 @@ export class WorkLinkController {
 	private startHeartbeat(api: WorkLinkApi, piSessionId: string): void {
 		this.stopHeartbeat();
 		this.timer = setInterval(() => {
-			api
-				.heartbeatWorkSession(piSessionId, this.options.planningCapable?.() ?? true)
+			const planningCapable = this.options.planningCapable?.() ?? true;
+			const models = this.options.availableModels?.();
+			(models === undefined
+				? api.heartbeatWorkSession(piSessionId, planningCapable)
+				: api.heartbeatWorkSession(piSessionId, planningCapable, models)
+			)
 				.then((result) => this.options.onHeartbeat?.(result, piSessionId))
 				.catch((error) => this.options.onHeartbeatError?.(error));
 		}, this.options.intervalMs ?? WORK_LINK_HEARTBEAT_MS);

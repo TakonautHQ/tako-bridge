@@ -10,7 +10,10 @@
  * `createPlanningTurnExecutor` (never argv, so nothing granted here ever
  * shows up in a process listing):
  *   TAKONAUT_PLANNING_SERVER_URL, TAKONAUT_PLANNING_API_KEY,
- *   TAKONAUT_PLANNING_ORG_ID   -- this member's own Bridge credentials.
+ *   TAKONAUT_PLANNING_ORG_ID   -- this member's own Bridge credentials, or
+ *   TAKONAUT_PLANNING_DELEGATE_TOKEN -- a hosted Grill turn's per-turn
+ *     delegate (Grill v2), which replaces the key: the turn may be a
+ *     teammate's, so it must never run with this member's own key.
  *   TAKONAUT_PLANNING_ALLOWED_TOOLS -- JSON array of exact MCP tool names.
  *   TAKONAUT_PLANNING_WORKTREE -- the pinned worktree; read-only builtins
  *     (read/grep/find/ls) are refused for any path outside it.
@@ -104,13 +107,14 @@ function isWithinWorktree(candidate: string, worktreeRoot: string, worktreeRootR
 
 export default function planningTurnToolsExtension(pi: ExtensionAPI): void {
 	const serverUrl = process.env.TAKONAUT_PLANNING_SERVER_URL ?? "";
-	const apiKey = process.env.TAKONAUT_PLANNING_API_KEY ?? "";
+	const delegateToken = process.env.TAKONAUT_PLANNING_DELEGATE_TOKEN ?? "";
+	const apiKey = delegateToken ? "" : (process.env.TAKONAUT_PLANNING_API_KEY ?? "");
 	const orgId = process.env.TAKONAUT_PLANNING_ORG_ID ?? "";
 	const worktreeRoot = process.env.TAKONAUT_PLANNING_WORKTREE
 		? resolve(process.env.TAKONAUT_PLANNING_WORKTREE)
 		: "";
 	const allowedTools = new Set(readAllowedTools(process.env.TAKONAUT_PLANNING_ALLOWED_TOOLS));
-	const configured = Boolean(serverUrl && apiKey && orgId && worktreeRoot);
+	const configured = Boolean(serverUrl && (apiKey || delegateToken) && orgId && worktreeRoot);
 	// Resolved once: an unconfigured worktree fails every read-only builtin
 	// closed below, rather than ever reaching `isWithinWorktree("")`, which
 	// `startsWith("/")` alone would pass for any absolute path.
@@ -148,7 +152,9 @@ export default function planningTurnToolsExtension(pi: ExtensionAPI): void {
 
 	if (!configured) return;
 
-	const client = new TakonautClient({ serverUrl, apiKey, orgId });
+	const client = new TakonautClient(
+		delegateToken ? { serverUrl, apiKey: "", orgId, delegateToken } : { serverUrl, apiKey, orgId },
+	);
 	const catalog = new TakonautToolCatalog(pi, () => client, []);
 
 	void (async () => {
